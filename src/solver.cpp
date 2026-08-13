@@ -9,6 +9,7 @@
 #include <limits>
 #include <numeric>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 
 namespace ocs {
@@ -381,8 +382,39 @@ bool Solver::set_shell_mesh(const OcsVec3 *vertices, uint32_t vertex_count,
     positions_ = rest_positions_;
     velocities_.assign(vertex_count, {});
     shell_triangles_.assign(triangles, triangles + triangle_count);
+    shell_seams_.clear();
     material_ = material;
     shell_set_ = true;
+    return true;
+}
+
+bool Solver::set_shell_seams(const OcsSeam *seams, uint32_t seam_count) {
+    error_.clear();
+    if (built_) {
+        error_ = "seams cannot be changed after ocsBuild";
+        return false;
+    }
+    if (seam_count == 0u) {
+        shell_seams_.clear();
+        return true;
+    }
+    if (!shell_set_) {
+        error_ = "ocsSetShellMesh must be called before ocsSetShellSeams";
+        return false;
+    }
+    if (!seams) {
+        error_ = "SHELL seam array is null";
+        return false;
+    }
+    shell_seams_.assign(seams, seams + seam_count);
+    for (const OcsSeam &seam : shell_seams_) {
+        if (seam.i0 == seam.i1 || !std::isfinite(seam.stiffness) ||
+            !(seam.stiffness > 0.0f)) {
+            error_ = "SHELL contains an invalid seam";
+            shell_seams_.clear();
+            return false;
+        }
+    }
     return true;
 }
 
@@ -494,6 +526,30 @@ bool Solver::build_shell_constraints() {
                 constraints_.push_back({oa, ob, bend_rest, material_.bend_stiffness});
             }
         }
+    }
+
+    seam_constraints_.clear();
+    seam_constraints_.reserve(shell_seams_.size());
+    std::unordered_set<uint64_t> seam_keys;
+    seam_keys.reserve(shell_seams_.size());
+    for (const OcsSeam &seam : shell_seams_) {
+        if (seam.i0 >= positions_.size() || seam.i1 >= positions_.size()) {
+            error_ = "SHELL seam contains an invalid vertex index";
+            return false;
+        }
+        const uint64_t key = edge_key(seam.i0, seam.i1);
+        if (!seam_keys.insert(key).second) {
+            error_ = "SHELL contains a duplicate seam";
+            return false;
+        }
+        const float rest = length(rest_positions_[seam.i0] -
+                                  rest_positions_[seam.i1]);
+        if (!(rest > kEpsilon)) {
+            error_ = "SHELL contains a zero-length seam";
+            return false;
+        }
+        seam_constraints_.push_back(
+            {seam.i0, seam.i1, rest, seam.stiffness});
     }
 
     incidence_offsets_.assign(positions_.size() + 1u, 0u);
@@ -667,6 +723,28 @@ uint64_t Solver::resolve_collisions(const std::vector<Vec3> &from,
     return contacts;
 }
 
+void Solver::project_seams(std::vector<Vec3> &positions) const {
+    const float structural = std::max(material_.stretch_stiffness, kEpsilon);
+    for (const Constraint &seam : seam_constraints_) {
+        Vec3 delta = positions[seam.a] - positions[seam.b];
+        float distance = length(delta);
+        if (!(distance > kEpsilon)) {
+            delta = rest_positions_[seam.a] - rest_positions_[seam.b];
+            distance = std::max(length(delta), kEpsilon);
+        }
+        const float inverse_a = 1.0f / masses_[seam.a];
+        const float inverse_b = 1.0f / masses_[seam.b];
+        const float inverse_sum = inverse_a + inverse_b;
+        const float relaxation =
+            std::clamp(seam.weight / (seam.weight + structural), 0.0f, 1.0f);
+        const Vec3 correction =
+            delta * (relaxation * (distance - seam.rest_length) /
+                     (distance * inverse_sum));
+        positions[seam.a] -= correction * inverse_a;
+        positions[seam.b] += correction * inverse_b;
+    }
+}
+
 bool Solver::step(float frame_dt) {
     error_.clear();
     stats_ = {};
@@ -718,11 +796,16 @@ bool Solver::step(float frame_dt) {
                 rhs_[vi] = value;
             }
             if (!solve_pcg(rhs_, inv_h2, iterate_)) return false;
+            project_seams(iterate_);
             for (uint32_t collision_pass = 0;
                  collision_pass < desc_.collision_iterations; ++collision_pass) {
                 stats_.contacts +=
                     resolve_collisions(substep_start_, iterate_, contact_normals_, contacted_);
+                if (collision_pass + 1u < desc_.collision_iterations) {
+                    project_seams(iterate_);
+                }
             }
+            project_seams(iterate_);
         }
 
 #pragma omp parallel for schedule(static) num_threads(threads_) if(n > kParallelThreshold)

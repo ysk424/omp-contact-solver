@@ -111,6 +111,7 @@ public:
     bool set_shell_mesh(const OcsVec3 *vertices, uint32_t vertex_count,
                         const OcsTriangle *triangles, uint32_t triangle_count,
                         const OcsShellMaterial &material);
+    bool set_shell_seams(const OcsSeam *seams, uint32_t seam_count);
     bool build();
     bool step(float frame_dt);
 
@@ -134,6 +135,7 @@ private:
                                 std::vector<Vec3> &positions,
                                 std::vector<Vec3> &contact_normals,
                                 std::vector<uint8_t> &contacted) const;
+    void project_seams(std::vector<Vec3> &positions) const;
     bool finite_state() const;
 
     OcsSolverDesc desc_{};
@@ -145,11 +147,13 @@ private:
     std::vector<Vec3> static_vertices_;
     std::vector<OcsTriangle> static_triangles_;
     std::vector<OcsTriangle> shell_triangles_;
+    std::vector<OcsSeam> shell_seams_;
     std::vector<Vec3> rest_positions_;
     std::vector<Vec3> positions_;
     std::vector<Vec3> velocities_;
     std::vector<float> masses_;
     std::vector<Constraint> constraints_;
+    std::vector<Constraint> seam_constraints_;
     std::vector<uint32_t> incidence_offsets_;
     std::vector<Incidence> incidence_;
     StaticBvh static_bvh_;

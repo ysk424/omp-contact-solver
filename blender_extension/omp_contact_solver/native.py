@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Iterable, Sequence
 
 
-OCS_ABI_VERSION = 1
+OCS_ABI_VERSION = 2
 OCS_OK = 0
 
 
@@ -30,6 +30,14 @@ class Triangle(ctypes.Structure):
         ("i0", ctypes.c_uint32),
         ("i1", ctypes.c_uint32),
         ("i2", ctypes.c_uint32),
+    ]
+
+
+class Seam(ctypes.Structure):
+    _fields_ = [
+        ("i0", ctypes.c_uint32),
+        ("i1", ctypes.c_uint32),
+        ("stiffness", ctypes.c_float),
     ]
 
 
@@ -93,6 +101,13 @@ def _as_triangle_array(values: Iterable[Sequence[int]]):
     return (Triangle * len(converted))(*converted)
 
 
+def _as_seam_array(values: Iterable[Sequence[int]], stiffness: float):
+    converted = [
+        Seam(int(value[0]), int(value[1]), float(stiffness)) for value in values
+    ]
+    return (Seam * len(converted))(*converted)
+
+
 class SolverLibrary:
     """Loaded DLL and fully declared C function table."""
 
@@ -150,6 +165,12 @@ class SolverLibrary:
             ctypes.POINTER(ShellMaterial),
         ]
         api.ocsSetShellMesh.restype = ctypes.c_int32
+        api.ocsSetShellSeams.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(Seam),
+            ctypes.c_uint32,
+        ]
+        api.ocsSetShellSeams.restype = ctypes.c_int32
         api.ocsBuild.argtypes = [ctypes.c_void_p]
         api.ocsBuild.restype = ctypes.c_int32
         api.ocsStep.argtypes = [ctypes.c_void_p, ctypes.c_float]
@@ -239,6 +260,15 @@ class Solver:
             ctypes.byref(material),
         )
         self._check(result, "Setting SHELL mesh")
+
+    def set_shell_seams(self, seams, stiffness: float) -> None:
+        seam_array = _as_seam_array(seams, stiffness)
+        result = self.library.api.ocsSetShellSeams(
+            self.handle,
+            seam_array if len(seam_array) else None,
+            len(seam_array),
+        )
+        self._check(result, "Setting SHELL seams")
 
     def build(self) -> None:
         self._check(self.library.api.ocsBuild(self.handle), "Building solver")

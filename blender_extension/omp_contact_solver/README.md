@@ -10,7 +10,8 @@ GPU.
 3. Assign a garment as source `SHELL` and a body/collider as source `STATIC`.
 4. Choose the start frame, then use **Prepare Simulation Copies**. This creates
    evaluated `SHELL` and `STATIC` snapshots in a separate collection, applies
-   source modifiers, and removes tiny `STATIC` triangles rejected by the DLL.
+   source modifiers, removes tiny `STATIC` triangles rejected by the DLL, and
+   detects nearby boundaries between disconnected SHELL parts as seam threads.
 5. Choose the frame range and material/solver values, then use **Bake
    Simulation**. The bake is written only to the prepared `SHELL`.
 
@@ -20,6 +21,11 @@ the prepared copies. Existing source Shape Keys are left untouched. **Clear
 Bake** only removes a Shape Key datablock created and owned by this Extension;
 **Clear Prepared** removes the generated collection objects and restores source
 `SHELL` visibility.
+
+**Auto Seam Threads** preserves each detected pair's initial distance without
+merging vertices, so UVs and materials remain intact. **Seam Distance** controls
+pair detection and requires running Prepare again after a change. The default
+thread stiffness is intentionally much higher than ordinary cloth Stretch.
 
 The current solver intentionally has no pins, self-collision, moving STATIC
 geometry, GPU backend, or renderer.

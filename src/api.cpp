@@ -156,6 +156,26 @@ OcsResult ocsSetShellMesh(OcsSolver *solver, const OcsVec3 *vertices,
     }
 }
 
+OcsResult ocsSetShellSeams(OcsSolver *solver, const OcsSeam *seams,
+                           uint32_t seam_count) {
+    if (!solver) {
+        return fail(nullptr, OCS_ERROR_INVALID_ARGUMENT, "solver is null");
+    }
+    try {
+        return solver->impl.set_shell_seams(seams, seam_count)
+                   ? OCS_OK
+                   : OCS_ERROR_INVALID_MESH;
+    } catch (const std::bad_alloc &) {
+        return fail(solver, OCS_ERROR_OUT_OF_MEMORY,
+                    "out of memory while setting SHELL seams");
+    } catch (const std::exception &e) {
+        return fail(solver, OCS_ERROR_INTERNAL, e.what());
+    } catch (...) {
+        return fail(solver, OCS_ERROR_INTERNAL,
+                    "unknown error while setting SHELL seams");
+    }
+}
+
 OcsResult ocsBuild(OcsSolver *solver) {
     if (!solver) return fail(nullptr, OCS_ERROR_INVALID_ARGUMENT, "solver is null");
     try {

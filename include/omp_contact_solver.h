@@ -18,7 +18,7 @@
 extern "C" {
 #endif
 
-#define OCS_ABI_VERSION 1u
+#define OCS_ABI_VERSION 2u
 
 typedef struct OcsSolver OcsSolver;
 
@@ -33,6 +33,14 @@ typedef struct OcsTriangle {
     uint32_t i1;
     uint32_t i2;
 } OcsTriangle;
+
+/* A non-stretching thread between two SHELL vertices. Rest length is captured
+ * from the SHELL positions during ocsBuild(). */
+typedef struct OcsSeam {
+    uint32_t i0;
+    uint32_t i1;
+    float stiffness;
+} OcsSeam;
 
 typedef enum OcsResult {
     OCS_OK = 0,
@@ -100,6 +108,12 @@ OCS_API OcsResult ocsSetShellMesh(OcsSolver *solver,
                                   uint32_t triangle_count,
                                   const OcsShellMaterial *material);
 
+/* Optional seam-thread constraints. Call after ocsSetShellMesh() and before
+ * ocsBuild(). Passing zero seams clears them. */
+OCS_API OcsResult ocsSetShellSeams(OcsSolver *solver,
+                                   const OcsSeam *seams,
+                                   uint32_t seam_count);
+
 /* Builds SHELL constraints and the immutable STATIC triangle BVH. */
 OCS_API OcsResult ocsBuild(OcsSolver *solver);
 
@@ -124,4 +138,3 @@ OCS_API const char *ocsGetLastError(const OcsSolver *solver);
 #endif
 
 #endif
-

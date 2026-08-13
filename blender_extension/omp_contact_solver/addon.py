@@ -23,6 +23,9 @@ _PREPARED_COLLECTION_TAG = "omp_contact_solver_prepared_collection_version"
 _PREPARED_OBJECT_TAG = "omp_contact_solver_prepared_object_version"
 _PREPARED_ROLE_TAG = "omp_contact_solver_role"
 _PREPARED_SOURCE_TAG = "omp_contact_solver_source"
+_PREPARED_SEAMS_TAG = "omp_contact_solver_seam_pairs"
+_PREPARED_SEAM_DISTANCE_TAG = "omp_contact_solver_seam_distance"
+_PREPARED_SEAM_ENABLED_TAG = "omp_contact_solver_seam_enabled"
 _PREPARED_COLLECTION_NAME = "OMP Contact Simulation"
 _STATIC_TWICE_AREA_FILTER = 1.25e-7
 _BAKE_RUNNING = False
@@ -124,6 +127,86 @@ def _validate_shell_mesh(mesh) -> None:
         )
 
 
+def _detect_seam_pairs(mesh, max_distance: float) -> list[tuple[int, int]]:
+    """Greedily pair nearby boundary vertices from disconnected components."""
+    if not (max_distance > 0.0):
+        return []
+
+    coordinates = [vertex.co.copy() for vertex in mesh.vertices]
+    adjacency = [set() for _vertex in coordinates]
+    edge_counts = {}
+    for polygon in mesh.polygons:
+        vertices = list(polygon.vertices)
+        for index, a in enumerate(vertices):
+            b = vertices[(index + 1) % len(vertices)]
+            edge = (a, b) if a < b else (b, a)
+            edge_counts[edge] = edge_counts.get(edge, 0) + 1
+            adjacency[a].add(b)
+            adjacency[b].add(a)
+
+    components = [-1] * len(coordinates)
+    component = 0
+    for root in range(len(coordinates)):
+        if components[root] >= 0:
+            continue
+        components[root] = component
+        stack = [root]
+        while stack:
+            vertex = stack.pop()
+            for neighbor in adjacency[vertex]:
+                if components[neighbor] < 0:
+                    components[neighbor] = component
+                    stack.append(neighbor)
+        component += 1
+
+    boundary = sorted(
+        {vertex for edge, count in edge_counts.items() if count == 1 for vertex in edge}
+    )
+    cell_size = max_distance
+    grid = {}
+    for vertex in boundary:
+        point = coordinates[vertex]
+        cell = tuple(math.floor(float(point[axis]) / cell_size) for axis in range(3))
+        grid.setdefault(cell, []).append(vertex)
+
+    maximum_squared = max_distance * max_distance
+    candidates = []
+    for a in boundary:
+        point = coordinates[a]
+        cell = tuple(math.floor(float(point[axis]) / cell_size) for axis in range(3))
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                for dz in (-1, 0, 1):
+                    neighbor_cell = (cell[0] + dx, cell[1] + dy, cell[2] + dz)
+                    for b in grid.get(neighbor_cell, ()):
+                        if b <= a or components[a] == components[b]:
+                            continue
+                        distance_squared = (coordinates[a] - coordinates[b]).length_squared
+                        if distance_squared <= maximum_squared:
+                            candidates.append((distance_squared, a, b))
+
+    candidates.sort()
+    paired = set()
+    seams = []
+    for _distance_squared, a, b in candidates:
+        if a in paired or b in paired:
+            continue
+        paired.add(a)
+        paired.add(b)
+        seams.append((a, b))
+    return seams
+
+
+def _prepared_seam_pairs(shell) -> list[tuple[int, int]]:
+    flattened = list(shell.get(_PREPARED_SEAMS_TAG, ()))
+    if len(flattened) % 2:
+        raise RuntimeError("Prepared SHELL seam data is invalid; run Prepare again")
+    return [
+        (int(flattened[index]), int(flattened[index + 1]))
+        for index in range(0, len(flattened), 2)
+    ]
+
+
 def _restore_source_shell_visibility(settings) -> None:
     if not settings.source_shell_hidden_by_prepare:
         return
@@ -192,6 +275,18 @@ def _prepared_pair(settings):
         or static.get(_PREPARED_SOURCE_TAG) != settings.static_object.name
     ):
         raise RuntimeError("Source objects changed; run Prepare again")
+    if (
+        bool(shell.get(_PREPARED_SEAM_ENABLED_TAG, False))
+        != settings.seam_enabled
+    ):
+        raise RuntimeError("Seam detection setting changed; run Prepare again")
+    if settings.seam_enabled and not math.isclose(
+        float(shell.get(_PREPARED_SEAM_DISTANCE_TAG, -1.0)),
+        settings.seam_search_distance,
+        rel_tol=1.0e-6,
+        abs_tol=1.0e-9,
+    ):
+        raise RuntimeError("Seam Distance changed; run Prepare again")
     return shell, static
 
 
@@ -324,6 +419,27 @@ class OCS_Settings(PropertyGroup):
         name="Stretch", default=5000.0, min=0.0, max=1.0e9
     )
     bend_stiffness: FloatProperty(name="Bend", default=5.0, min=0.0, max=1.0e9)
+    seam_enabled: BoolProperty(
+        name="Auto Seam Threads",
+        description="Connect nearby boundary vertices from disconnected SHELL parts",
+        default=True,
+    )
+    seam_search_distance: FloatProperty(
+        name="Seam Distance",
+        description="Maximum rest distance for automatic seam pairing; run Prepare after changing",
+        default=0.01,
+        min=1.0e-6,
+        max=1.0,
+        subtype="DISTANCE",
+        precision=4,
+    )
+    seam_stiffness: FloatProperty(
+        name="Seam Stiffness",
+        description="Non-stretching thread strength applied to detected seam pairs",
+        default=10000000.0,
+        min=1.0,
+        max=1.0e9,
+    )
     thickness: FloatProperty(
         name="Thickness", default=0.01, min=0.0, max=1000.0, subtype="DISTANCE"
     )
@@ -331,6 +447,7 @@ class OCS_Settings(PropertyGroup):
     restitution: FloatProperty(name="Restitution", default=0.0, min=0.0, max=1.0)
     last_prepare_status: StringProperty(name="Prepare Status", default="Not prepared")
     last_prepare_skipped: IntProperty(name="Skipped STATIC Triangles", default=0)
+    last_seam_count: IntProperty(name="Detected Seams", default=0)
     last_status: StringProperty(name="Status", default="Not baked")
     last_contacts: StringProperty(name="Contacts", default="-")
     last_residual: StringProperty(name="PCG Residual", default="-")
@@ -397,6 +514,7 @@ class OCS_OT_prepare(Operator):
             context.scene.frame_set(settings.frame_start)
             _remove_prepared(settings, restore_visibility=True)
             settings.last_prepare_skipped = 0
+            settings.last_seam_count = 0
 
             collection = bpy.data.collections.new(_PREPARED_COLLECTION_NAME)
             collection[_PREPARED_COLLECTION_TAG] = 1
@@ -413,6 +531,19 @@ class OCS_OT_prepare(Operator):
             prepared_shell[_PREPARED_ROLE_TAG] = "SHELL"
             prepared_shell[_PREPARED_SOURCE_TAG] = source_shell.name
             _validate_shell_mesh(prepared_shell.data)
+            seam_pairs = (
+                _detect_seam_pairs(
+                    prepared_shell.data,
+                    settings.seam_search_distance,
+                )
+                if settings.seam_enabled
+                else []
+            )
+            flattened_seams = [vertex for pair in seam_pairs for vertex in pair]
+            if flattened_seams:
+                prepared_shell[_PREPARED_SEAMS_TAG] = flattened_seams
+            prepared_shell[_PREPARED_SEAM_DISTANCE_TAG] = settings.seam_search_distance
+            prepared_shell[_PREPARED_SEAM_ENABLED_TAG] = settings.seam_enabled
 
             prepared_static = _evaluated_snapshot(
                 source_static,
@@ -435,8 +566,10 @@ class OCS_OT_prepare(Operator):
             settings.prepared_source_shell_name = source_shell.name
             settings.prepared_source_static_name = source_static.name
             settings.last_prepare_skipped = skipped
+            settings.last_seam_count = len(seam_pairs)
             settings.last_prepare_status = (
-                f"Prepared in {collection.name}; skipped {skipped} tiny STATIC triangles"
+                f"Prepared in {collection.name}; {len(seam_pairs)} seams; "
+                f"skipped {skipped} tiny STATIC triangles"
             )
             settings.last_status = "Ready to bake"
             settings.last_contacts = "-"
@@ -459,6 +592,7 @@ class OCS_OT_prepare(Operator):
                 _remove_prepared(settings, restore_visibility=True)
             settings.last_prepare_status = f"Prepare failed: {exc}"
             settings.last_prepare_skipped = 0
+            settings.last_seam_count = 0
             settings.last_status = settings.last_prepare_status
             self.report({"ERROR"}, str(exc))
             return {"CANCELLED"}
@@ -481,6 +615,7 @@ class OCS_OT_clear_prepared(Operator):
         )
         settings = context.scene.ocs_settings
         settings.last_prepare_skipped = 0
+        settings.last_seam_count = 0
         settings.last_prepare_status = "Not prepared"
         settings.last_status = "Prepared copies cleared" if removed else "Nothing to clear"
         settings.last_contacts = "-"
@@ -554,6 +689,9 @@ class OCS_OT_bake(Operator):
 
             shell_vertices, shell_triangles = _shell_mesh(shell)
             static_vertices, static_triangles = _shell_mesh(static)
+            seam_pairs = (
+                _prepared_seam_pairs(shell) if settings.seam_enabled else []
+            )
             if not shell_triangles:
                 raise RuntimeError("SHELL has no triangles")
             if not static_triangles:
@@ -585,6 +723,7 @@ class OCS_OT_bake(Operator):
             with library.create(desc) as solver:
                 solver.set_static_mesh(static_vertices, static_triangles)
                 solver.set_shell_mesh(shell_vertices, shell_triangles, material)
+                solver.set_shell_seams(seam_pairs, settings.seam_stiffness)
                 solver.build()
 
                 basis = shell.shape_key_add(name="Basis", from_mix=False)
@@ -613,7 +752,7 @@ class OCS_OT_bake(Operator):
             elapsed = time.perf_counter() - bake_started
             settings.last_status = (
                 f"Baked {settings.frame_end - settings.frame_start + 1} frames "
-                f"in {elapsed:.2f} s"
+                f"with {len(seam_pairs)} seams in {elapsed:.2f} s"
             )
             if final_stats is not None:
                 settings.last_contacts = str(final_stats.contact_count)
@@ -699,6 +838,15 @@ class OCS_PT_solver(Panel):
         material.prop(settings, "thickness")
         material.prop(settings, "friction")
         material.prop(settings, "restitution")
+
+        seams = layout.box()
+        seams.label(text="Seam Threads")
+        seams.prop(settings, "seam_enabled")
+        seam_settings = seams.column()
+        seam_settings.enabled = settings.seam_enabled
+        seam_settings.prop(settings, "seam_search_distance")
+        seam_settings.prop(settings, "seam_stiffness")
+        seams.label(text=f"Detected pairs: {settings.last_seam_count}")
 
         solver = layout.box()
         solver.label(text="Solver")

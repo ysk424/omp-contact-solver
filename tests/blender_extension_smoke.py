@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 import sys
 from pathlib import Path
 
@@ -52,8 +53,12 @@ def main():
                 (0.5, -0.5, 0.5),
                 (0.5, 0.5, 0.7),
                 (-0.5, 0.5, 0.5),
+                (0.502, -0.5, 0.5),
+                (1.502, -0.5, 0.5),
+                (1.502, 0.5, 0.5),
+                (0.502, 0.5, 0.7),
             ],
-            [(0, 1, 2), (0, 2, 3)],
+            [(0, 1, 2), (0, 2, 3), (4, 5, 6), (4, 6, 7)],
         )
         static.location.z = 0.1
         shell.location = (0.2, -0.1, 0.3)
@@ -86,6 +91,9 @@ def main():
         settings.frame_end = 24
         settings.substeps = 4
         settings.thickness = 0.02
+        settings.seam_enabled = True
+        settings.seam_search_distance = 0.01
+        settings.seam_stiffness = 10000000.0
 
         assert bpy.ops.ocs.prepare() == {"FINISHED"}
         prepared_shell = settings.prepared_shell_object
@@ -112,6 +120,15 @@ def main():
         prepared_static.data.calc_loop_triangles()
         assert len(prepared_static.data.loop_triangles) == 2
         assert settings.last_prepare_skipped == 1
+        assert settings.last_seam_count == 2
+        seam_pairs = [(1, 4), (2, 7)]
+        seam_rest_lengths = [
+            math.dist(
+                tuple(prepared_shell.data.vertices[a].co),
+                tuple(prepared_shell.data.vertices[b].co),
+            )
+            for a, b in seam_pairs
+        ]
 
         assert bpy.ops.ocs.bake() == {"FINISHED"}
         keys = prepared_shell.data.shape_keys
@@ -119,6 +136,10 @@ def main():
         assert keys.get("omp_contact_solver_bake_version") == 1
         assert len(keys.key_blocks) == 24
         assert keys.use_relative is False
+        final_points = keys.key_blocks[-1].data
+        for (a, b), rest_length in zip(seam_pairs, seam_rest_lengths):
+            final_length = math.dist(tuple(final_points[a].co), tuple(final_points[b].co))
+            assert abs(final_length / rest_length - 1.0) < 1.0e-3
         final_height = min(
             (prepared_shell.matrix_world @ point.co).z
             for point in keys.key_blocks[-1].data

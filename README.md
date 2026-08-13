@@ -13,6 +13,7 @@ Supported:
 - one deformable triangle `SHELL` mesh;
 - one immutable triangle `STATIC` mesh (it may contain disconnected objects);
 - gravity, inertia, damping, stretch and simple bending;
+- high-strength seam threads between disconnected SHELL parts;
 - two-sided `SHELL` vertex versus `STATIC` triangle contact;
 - thickness, friction and restitution;
 - OpenMP parallel prediction, constraint projection, PCG and BVH queries;
@@ -31,7 +32,9 @@ constraints; the two opposite vertices of each interior edge provide the
 compact bending constraint. The global system is solved by a Jacobi-
 preconditioned, OpenMP-parallel matrix-free PCG. STATIC triangles are stored in
 an immutable median-split BVH. A swept vertex-triangle test catches crossings,
-and a closest-point projection maintains the requested cloth thickness.
+and a closest-point projection maintains the requested cloth thickness. Seam
+threads use their captured rest length and a dedicated non-stretching
+projection after contact.
 
 ## Build
 
@@ -95,15 +98,16 @@ cmake --build build --target blender-extension
 cmake --build build --target blender-extension-test
 ```
 
-Install `build/packages/omp_contact_solver-0.2.0-windows-x64.zip` from
+Install `build/packages/omp_contact_solver-0.3.0-windows-x64.zip` from
 **Edit > Preferences > Extensions > Install from Disk**. The controls are in
 **3D View > Sidebar > OMP Cloth**. Assign source meshes, then use **Prepare
 Simulation Copies**. The Extension evaluates both sources at the first bake
 frame into a separate `OMP Contact Simulation` collection. It applies the
 source modifiers, triangulates the prepared `STATIC`, and omits triangles below
-the native solver's area tolerance. Baking and clearing then operate only on
-the prepared `SHELL`; source meshes and their existing Shape Keys are not
-overwritten.
+the native solver's area tolerance. It also pairs nearby boundary vertices from
+disconnected SHELL parts as high-strength seam threads without merging the
+mesh. Baking and clearing then operate only on the prepared `SHELL`; source
+meshes and their existing Shape Keys are not overwritten.
 
 ## DLL API
 
@@ -125,6 +129,7 @@ OcsShellMaterial material;
 ocsDefaultShellMaterial(&material);
 ocsSetShellMesh(solver, shell_vertices, shell_vertex_count,
                 shell_triangles, shell_triangle_count, &material);
+ocsSetShellSeams(solver, seams, seam_count); /* Optional. */
 
 ocsBuild(solver);
 ocsStep(solver, 1.0f / 60.0f);

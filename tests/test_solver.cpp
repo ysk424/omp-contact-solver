@@ -117,6 +117,51 @@ void test_static_floor_contact() {
     ocsDestroy(solver);
 }
 
+void test_seam_thread() {
+    OcsSolverDesc desc;
+    ocsDefaultSolverDesc(&desc);
+    desc.substeps = 4;
+    desc.pd_iterations = 10;
+    desc.pcg_iterations = 200;
+    OcsSolver *solver = ocsCreate(&desc);
+    require(solver != nullptr, "create seam solver");
+
+    const OcsVec3 floor_vertices[] = {
+        {-3.0f, 0.0f, -3.0f}, {3.0f, 0.0f, -3.0f},
+        {3.0f, 0.0f, 3.0f}, {-3.0f, 0.0f, 3.0f}};
+    const OcsTriangle floor_triangles[] = {{0, 2, 1}, {0, 3, 2}};
+    require_ok(ocsSetStaticMesh(solver, floor_vertices, 4,
+                                floor_triangles, 2),
+               solver, "set seam STATIC floor");
+
+    const OcsVec3 shell_vertices[] = {
+        {-0.2f, 0.02f, -0.2f}, {0.2f, 0.02f, -0.2f},
+        {0.0f, 0.02f, 0.2f},
+        {-0.2f, 1.0f, -0.2f}, {0.2f, 1.0f, -0.2f},
+        {0.0f, 1.0f, 0.2f}};
+    const OcsTriangle shell_triangles[] = {{0, 1, 2}, {3, 4, 5}};
+    OcsShellMaterial material;
+    ocsDefaultShellMaterial(&material);
+    material.thickness = 0.02f;
+    require_ok(ocsSetShellMesh(solver, shell_vertices, 6,
+                               shell_triangles, 2, &material),
+               solver, "set disconnected seam SHELL");
+    const OcsSeam seams[] = {{0, 3, 1.0e6f}};
+    require_ok(ocsSetShellSeams(solver, seams, 1), solver,
+               "set seam thread");
+    require_ok(ocsBuild(solver), solver, "build seam solver");
+    for (int frame = 0; frame < 10; ++frame) {
+        require_ok(ocsStep(solver, 1.0f / 60.0f), solver, "seam step");
+    }
+    OcsVec3 result[6];
+    require_ok(ocsCopyShellPositions(solver, result, 6), solver,
+               "copy seam positions");
+    const float rest_length = distance(shell_vertices[0], shell_vertices[3]);
+    require(std::abs(distance(result[0], result[3]) - rest_length) < 2.0e-3f,
+            "strong seam thread must preserve its rest length");
+    ocsDestroy(solver);
+}
+
 void test_invalid_mesh() {
     OcsSolver *solver = ocsCreate(nullptr);
     require(solver != nullptr, "create invalid-mesh solver");
@@ -225,6 +270,7 @@ int main() {
     require(ocsIsOpenMpEnabled() == 1, "library must be compiled with OpenMP");
     test_free_fall();
     test_static_floor_contact();
+    test_seam_thread();
     test_invalid_mesh();
     test_openmp_sized_mesh();
     test_swept_floor_contact();
