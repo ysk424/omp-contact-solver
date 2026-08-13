@@ -1,9 +1,12 @@
 """Blender UI and bake pipeline for the OpenMP cloth DLL."""
 
+import math
 import time
 
+import bmesh
 import bpy
 from bpy.props import (
+    BoolProperty,
     FloatProperty,
     FloatVectorProperty,
     IntProperty,
@@ -16,6 +19,12 @@ from .native import NativeSolverError, Vec3, get_library
 
 
 _BAKE_TAG = "omp_contact_solver_bake_version"
+_PREPARED_COLLECTION_TAG = "omp_contact_solver_prepared_collection_version"
+_PREPARED_OBJECT_TAG = "omp_contact_solver_prepared_object_version"
+_PREPARED_ROLE_TAG = "omp_contact_solver_role"
+_PREPARED_SOURCE_TAG = "omp_contact_solver_source"
+_PREPARED_COLLECTION_NAME = "OMP Contact Simulation"
+_STATIC_TWICE_AREA_FILTER = 1.25e-7
 _BAKE_RUNNING = False
 
 
@@ -43,6 +52,147 @@ def _static_mesh(obj, depsgraph):
         return _triangulated_mesh(mesh, evaluated.matrix_world)
     finally:
         evaluated.to_mesh_clear()
+
+
+def _evaluated_snapshot(source, depsgraph, name):
+    evaluated = source.evaluated_get(depsgraph)
+    mesh = bpy.data.meshes.new_from_object(
+        evaluated,
+        preserve_all_data_layers=True,
+        depsgraph=depsgraph,
+    )
+    if mesh is None:
+        raise RuntimeError(f"{source.name} could not be evaluated as a mesh")
+    try:
+        mesh.name = f"{name}_Mesh"
+        mesh.transform(evaluated.matrix_world)
+        mesh.update()
+        obj = bpy.data.objects.new(name, mesh)
+    except Exception:
+        bpy.data.meshes.remove(mesh)
+        raise
+    obj.color = tuple(source.color)
+    obj.show_in_front = source.show_in_front
+    return obj
+
+
+def _clean_static_mesh(mesh) -> int:
+    """Triangulate STATIC and discard faces the native float solver rejects."""
+    bm = bmesh.new()
+    try:
+        bm.from_mesh(mesh)
+        bmesh.ops.triangulate(bm, faces=list(bm.faces))
+        rejected = []
+        for face in bm.faces:
+            if len(face.verts) != 3:
+                rejected.append(face)
+                continue
+            a, b, c = (vertex.co for vertex in face.verts)
+            twice_area = (b - a).cross(c - a).length
+            if not math.isfinite(twice_area) or twice_area <= _STATIC_TWICE_AREA_FILTER:
+                rejected.append(face)
+        if rejected:
+            bmesh.ops.delete(bm, geom=rejected, context="FACES")
+        bm.to_mesh(mesh)
+    finally:
+        bm.free()
+    mesh.update()
+    return len(rejected)
+
+
+def _validate_shell_mesh(mesh) -> None:
+    mesh.calc_loop_triangles()
+    used_vertices = set()
+    rejected = 0
+    for triangle in mesh.loop_triangles:
+        i0, i1, i2 = triangle.vertices
+        used_vertices.update((i0, i1, i2))
+        a = mesh.vertices[i0].co
+        b = mesh.vertices[i1].co
+        c = mesh.vertices[i2].co
+        twice_area = (b - a).cross(c - a).length
+        if not math.isfinite(twice_area) or twice_area <= 1.0e-7:
+            rejected += 1
+    if rejected:
+        raise RuntimeError(
+            f"Prepared SHELL contains {rejected} triangles that are too small"
+        )
+    orphan_count = len(mesh.vertices) - len(used_vertices)
+    if orphan_count:
+        raise RuntimeError(
+            f"Prepared SHELL contains {orphan_count} vertices outside its faces"
+        )
+
+
+def _restore_source_shell_visibility(settings) -> None:
+    if not settings.source_shell_hidden_by_prepare:
+        return
+    source = bpy.data.objects.get(settings.prepared_source_shell_name)
+    if source is None:
+        source = settings.shell_object
+    if source is not None:
+        source.hide_set(False)
+    settings.source_shell_hidden_by_prepare = False
+
+
+def _remove_prepared(settings, *, restore_visibility: bool) -> bool:
+    if restore_visibility:
+        _restore_source_shell_visibility(settings)
+
+    collection = settings.prepared_collection
+    objects = []
+    for obj in (settings.prepared_shell_object, settings.prepared_static_object):
+        if obj is not None and obj.get(_PREPARED_OBJECT_TAG) == 1:
+            objects.append(obj)
+    if collection is not None and collection.get(_PREPARED_COLLECTION_TAG) == 1:
+        for obj in collection.objects:
+            if obj.get(_PREPARED_OBJECT_TAG) == 1 and obj not in objects:
+                objects.append(obj)
+
+    settings.prepared_shell_object = None
+    settings.prepared_static_object = None
+    settings.prepared_collection = None
+    settings.prepared_source_shell_name = ""
+    settings.prepared_source_static_name = ""
+
+    removed = bool(objects)
+    for obj in objects:
+        mesh = obj.data if obj.type == "MESH" else None
+        bpy.data.objects.remove(obj, do_unlink=True)
+        if mesh is not None and mesh.users == 0:
+            bpy.data.meshes.remove(mesh)
+
+    if (
+        collection is not None
+        and collection.get(_PREPARED_COLLECTION_TAG) == 1
+        and not collection.objects
+        and not collection.children
+    ):
+        bpy.data.collections.remove(collection, do_unlink=True)
+        removed = True
+    return removed
+
+
+def _prepared_pair(settings):
+    shell = settings.prepared_shell_object
+    static = settings.prepared_static_object
+    if shell is None or static is None:
+        raise RuntimeError("Run Prepare Simulation Copies first")
+    if (
+        shell.get(_PREPARED_OBJECT_TAG) != 1
+        or shell.get(_PREPARED_ROLE_TAG) != "SHELL"
+        or static.get(_PREPARED_OBJECT_TAG) != 1
+        or static.get(_PREPARED_ROLE_TAG) != "STATIC"
+    ):
+        raise RuntimeError("Prepared simulation objects are invalid; run Prepare again")
+    if (
+        settings.shell_object is None
+        or settings.static_object is None
+        or shell.get(_PREPARED_SOURCE_TAG) != settings.shell_object.name
+        or static.get(_PREPARED_SOURCE_TAG) != settings.static_object.name
+    ):
+        raise RuntimeError("Source objects changed; run Prepare again")
+    return shell, static
 
 
 def _owned_bake(obj) -> bool:
@@ -106,17 +256,37 @@ def _configure_absolute_shape_keys(shell, frame_start, frame_end) -> None:
 
 class OCS_Settings(PropertyGroup):
     shell_object: PointerProperty(
-        name="SHELL",
-        description="Deformable triangle mesh to simulate",
+        name="Source SHELL",
+        description="Source garment evaluated at the first bake frame",
         type=bpy.types.Object,
         poll=_mesh_object,
     )
     static_object: PointerProperty(
-        name="STATIC",
-        description="Immutable collision mesh evaluated at the first bake frame",
+        name="Source STATIC",
+        description="Source collision body evaluated at the first bake frame",
         type=bpy.types.Object,
         poll=_mesh_object,
     )
+    prepared_shell_object: PointerProperty(
+        name="Prepared SHELL",
+        type=bpy.types.Object,
+        poll=_mesh_object,
+        options={"HIDDEN"},
+    )
+    prepared_static_object: PointerProperty(
+        name="Prepared STATIC",
+        type=bpy.types.Object,
+        poll=_mesh_object,
+        options={"HIDDEN"},
+    )
+    prepared_collection: PointerProperty(
+        name="Prepared Collection",
+        type=bpy.types.Collection,
+        options={"HIDDEN"},
+    )
+    prepared_source_shell_name: StringProperty(options={"HIDDEN"})
+    prepared_source_static_name: StringProperty(options={"HIDDEN"})
+    source_shell_hidden_by_prepare: BoolProperty(default=False, options={"HIDDEN"})
     frame_start: IntProperty(name="Start", default=1, min=-1048574, max=1048574)
     frame_end: IntProperty(name="End", default=120, min=-1048574, max=1048574)
     time_scale: FloatProperty(name="Time Scale", default=1.0, min=0.001, max=100.0)
@@ -159,6 +329,8 @@ class OCS_Settings(PropertyGroup):
     )
     friction: FloatProperty(name="Friction", default=0.3, min=0.0, max=1.0)
     restitution: FloatProperty(name="Restitution", default=0.0, min=0.0, max=1.0)
+    last_prepare_status: StringProperty(name="Prepare Status", default="Not prepared")
+    last_prepare_skipped: IntProperty(name="Skipped STATIC Triangles", default=0)
     last_status: StringProperty(name="Status", default="Not baked")
     last_contacts: StringProperty(name="Contacts", default="-")
     last_residual: StringProperty(name="PCG Residual", default="-")
@@ -192,15 +364,140 @@ class OCS_OT_set_active_static(Operator):
         return {"FINISHED"}
 
 
+class OCS_OT_prepare(Operator):
+    bl_idname = "ocs.prepare"
+    bl_label = "Prepare Simulation Copies"
+    bl_description = (
+        "Evaluate source meshes into a separate collection and remove tiny STATIC faces"
+    )
+
+    def execute(self, context):
+        if _BAKE_RUNNING:
+            self.report({"ERROR"}, "A solver bake is already running")
+            return {"CANCELLED"}
+        if context.mode != "OBJECT":
+            self.report({"ERROR"}, "Switch Blender to Object Mode before preparing")
+            return {"CANCELLED"}
+
+        settings = context.scene.ocs_settings
+        source_shell = settings.shell_object
+        source_static = settings.static_object
+        if source_shell is None or source_static is None:
+            self.report({"ERROR"}, "Assign both source SHELL and source STATIC meshes")
+            return {"CANCELLED"}
+        if source_shell == source_static:
+            self.report({"ERROR"}, "Source SHELL and STATIC must be different objects")
+            return {"CANCELLED"}
+
+        old_frame = context.scene.frame_current
+        collection = None
+        prepared_shell = None
+        prepared_static = None
+        try:
+            context.scene.frame_set(settings.frame_start)
+            _remove_prepared(settings, restore_visibility=True)
+            settings.last_prepare_skipped = 0
+
+            collection = bpy.data.collections.new(_PREPARED_COLLECTION_NAME)
+            collection[_PREPARED_COLLECTION_TAG] = 1
+            context.scene.collection.children.link(collection)
+            depsgraph = context.evaluated_depsgraph_get()
+
+            prepared_shell = _evaluated_snapshot(
+                source_shell,
+                depsgraph,
+                f"{source_shell.name}_OMP_SHELL",
+            )
+            collection.objects.link(prepared_shell)
+            prepared_shell[_PREPARED_OBJECT_TAG] = 1
+            prepared_shell[_PREPARED_ROLE_TAG] = "SHELL"
+            prepared_shell[_PREPARED_SOURCE_TAG] = source_shell.name
+            _validate_shell_mesh(prepared_shell.data)
+
+            prepared_static = _evaluated_snapshot(
+                source_static,
+                depsgraph,
+                f"{source_static.name}_OMP_STATIC",
+            )
+            collection.objects.link(prepared_static)
+            prepared_static[_PREPARED_OBJECT_TAG] = 1
+            prepared_static[_PREPARED_ROLE_TAG] = "STATIC"
+            prepared_static[_PREPARED_SOURCE_TAG] = source_static.name
+            skipped = _clean_static_mesh(prepared_static.data)
+            prepared_static.display_type = "WIRE"
+            prepared_static.hide_render = True
+            if not prepared_static.data.polygons:
+                raise RuntimeError("Prepared STATIC has no usable triangles")
+
+            settings.prepared_collection = collection
+            settings.prepared_shell_object = prepared_shell
+            settings.prepared_static_object = prepared_static
+            settings.prepared_source_shell_name = source_shell.name
+            settings.prepared_source_static_name = source_static.name
+            settings.last_prepare_skipped = skipped
+            settings.last_prepare_status = (
+                f"Prepared in {collection.name}; skipped {skipped} tiny STATIC triangles"
+            )
+            settings.last_status = "Ready to bake"
+            settings.last_contacts = "-"
+            settings.last_residual = "-"
+
+            if not source_shell.hide_get():
+                source_shell.hide_set(True)
+                settings.source_shell_hidden_by_prepare = True
+            for obj in context.selected_objects:
+                obj.select_set(False)
+            prepared_shell.select_set(True)
+            context.view_layer.objects.active = prepared_shell
+            self.report({"INFO"}, settings.last_prepare_status)
+            return {"FINISHED"}
+        except Exception as exc:
+            if collection is not None:
+                settings.prepared_shell_object = prepared_shell
+                settings.prepared_static_object = prepared_static
+                settings.prepared_collection = collection
+                _remove_prepared(settings, restore_visibility=True)
+            settings.last_prepare_status = f"Prepare failed: {exc}"
+            settings.last_prepare_skipped = 0
+            settings.last_status = settings.last_prepare_status
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+        finally:
+            context.scene.frame_set(old_frame)
+
+
+class OCS_OT_clear_prepared(Operator):
+    bl_idname = "ocs.clear_prepared"
+    bl_label = "Clear Prepared"
+    bl_description = "Remove simulation copies created by OMP Contact Solver"
+
+    def execute(self, context):
+        if _BAKE_RUNNING:
+            self.report({"ERROR"}, "A solver bake is already running")
+            return {"CANCELLED"}
+        removed = _remove_prepared(
+            context.scene.ocs_settings,
+            restore_visibility=True,
+        )
+        settings = context.scene.ocs_settings
+        settings.last_prepare_skipped = 0
+        settings.last_prepare_status = "Not prepared"
+        settings.last_status = "Prepared copies cleared" if removed else "Nothing to clear"
+        settings.last_contacts = "-"
+        settings.last_residual = "-"
+        self.report({"INFO"}, settings.last_status)
+        return {"FINISHED"}
+
+
 class OCS_OT_clear_bake(Operator):
     bl_idname = "ocs.clear_bake"
     bl_label = "Clear Bake"
     bl_description = "Remove Shape Keys created by OMP Contact Solver"
 
     def execute(self, context):
-        shell = context.scene.ocs_settings.shell_object
-        if shell is None:
-            self.report({"ERROR"}, "Assign a SHELL mesh first")
+        shell = context.scene.ocs_settings.prepared_shell_object
+        if shell is None or shell.get(_PREPARED_OBJECT_TAG) != 1:
+            self.report({"ERROR"}, "Run Prepare Simulation Copies first")
             return {"CANCELLED"}
         try:
             if not _clear_owned_bake(shell):
@@ -224,22 +521,19 @@ class OCS_OT_bake(Operator):
             return {"CANCELLED"}
 
         settings = context.scene.ocs_settings
-        shell = settings.shell_object
-        static = settings.static_object
         if context.mode != "OBJECT":
             self.report({"ERROR"}, "Switch Blender to Object Mode before baking")
             return {"CANCELLED"}
-        if shell is None or static is None:
-            self.report({"ERROR"}, "Assign both SHELL and STATIC mesh objects")
-            return {"CANCELLED"}
-        if shell == static:
-            self.report({"ERROR"}, "SHELL and STATIC must be different objects")
+        try:
+            shell, static = _prepared_pair(settings)
+        except RuntimeError as exc:
+            self.report({"ERROR"}, str(exc))
             return {"CANCELLED"}
         if settings.frame_end <= settings.frame_start:
             self.report({"ERROR"}, "End frame must be greater than start frame")
             return {"CANCELLED"}
         if shell.data.shape_keys and not _owned_bake(shell):
-            self.report({"ERROR"}, "SHELL already has Shape Keys; use an unbaked mesh copy")
+            self.report({"ERROR"}, "Prepared SHELL was modified; run Prepare again")
             return {"CANCELLED"}
         if abs(shell.matrix_world.determinant()) < 1.0e-12:
             self.report({"ERROR"}, "SHELL object transform is singular")
@@ -259,9 +553,7 @@ class OCS_OT_bake(Operator):
                 _clear_owned_bake(shell)
 
             shell_vertices, shell_triangles = _shell_mesh(shell)
-            static_vertices, static_triangles = _static_mesh(
-                static, context.evaluated_depsgraph_get()
-            )
+            static_vertices, static_triangles = _shell_mesh(static)
             if not shell_triangles:
                 raise RuntimeError("SHELL has no triangles")
             if not static_triangles:
@@ -365,11 +657,32 @@ class OCS_PT_solver(Panel):
         layout.label(text=text, icon=icon)
 
         objects = layout.box()
-        objects.label(text="Objects")
+        objects.label(text="Source Objects")
         objects.prop(settings, "shell_object")
         objects.operator("ocs.set_active_shell", icon="OUTLINER_OB_MESH")
         objects.prop(settings, "static_object")
         objects.operator("ocs.set_active_static", icon="MOD_PHYSICS")
+
+        prepare_row = objects.row(align=True)
+        prepare_row.scale_y = 1.25
+        prepare_row.operator("ocs.prepare", icon="DUPLICATE")
+        prepare_row.operator("ocs.clear_prepared", icon="X")
+
+        prepared = layout.box()
+        prepared.label(text="Simulation Copies")
+        shell_name = (
+            settings.prepared_shell_object.name
+            if settings.prepared_shell_object is not None
+            else "-"
+        )
+        static_name = (
+            settings.prepared_static_object.name
+            if settings.prepared_static_object is not None
+            else "-"
+        )
+        prepared.label(text=f"SHELL: {shell_name}", icon="MESH_GRID")
+        prepared.label(text=f"STATIC: {static_name}", icon="MOD_PHYSICS")
+        prepared.label(text=settings.last_prepare_status, icon="INFO")
 
         timing = layout.box()
         timing.label(text="Bake Range")
@@ -413,6 +726,8 @@ _CLASSES = (
     OCS_Settings,
     OCS_OT_set_active_shell,
     OCS_OT_set_active_static,
+    OCS_OT_prepare,
+    OCS_OT_clear_prepared,
     OCS_OT_clear_bake,
     OCS_OT_bake,
     OCS_PT_solver,

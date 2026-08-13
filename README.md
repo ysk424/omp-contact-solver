@@ -95,11 +95,15 @@ cmake --build build --target blender-extension
 cmake --build build --target blender-extension-test
 ```
 
-Install `build/packages/omp_contact_solver-0.1.0-windows-x64.zip` from
+Install `build/packages/omp_contact_solver-0.2.0-windows-x64.zip` from
 **Edit > Preferences > Extensions > Install from Disk**. The controls are in
-**3D View > Sidebar > OMP Cloth**. Existing Shape Keys are never overwritten;
-use an unbaked mesh copy as `SHELL`. The Extension's **Clear Bake** command only
-removes a Shape Key datablock it owns.
+**3D View > Sidebar > OMP Cloth**. Assign source meshes, then use **Prepare
+Simulation Copies**. The Extension evaluates both sources at the first bake
+frame into a separate `OMP Contact Simulation` collection. It applies the
+source modifiers, triangulates the prepared `STATIC`, and omits triangles below
+the native solver's area tolerance. Baking and clearing then operate only on
+the prepared `SHELL`; source meshes and their existing Shape Keys are not
+overwritten.
 
 ## DLL API
 

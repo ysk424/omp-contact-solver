@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(omp_contact_solver VERSION 0.1.0 LANGUAGES C CXX)
+project(omp_contact_solver VERSION 0.2.0 LANGUAGES C CXX)
 
 option(OCS_BUILD_TESTS "Build the solver tests" ON)
 option(OCS_BUILD_EXAMPLES "Build the examples" ON)
@@ -109,7 +109,7 @@ if(OCS_BUILD_BLENDER_EXTENSION AND WIN32)
         "${CMAKE_BINARY_DIR}/blender-extension/omp_contact_solver")
     set(OCS_EXTENSION_PACKAGE_DIR "${CMAKE_BINARY_DIR}/packages")
     set(OCS_EXTENSION_PACKAGE
-        "${OCS_EXTENSION_PACKAGE_DIR}/omp_contact_solver-0.1.0-windows-x64.zip")
+        "${OCS_EXTENSION_PACKAGE_DIR}/omp_contact_solver-0.2.0-windows-x64.zip")
     file(GLOB OCS_EXTENSION_FILES CONFIGURE_DEPENDS
         "${OCS_EXTENSION_SOURCE}/*.py"
         "${OCS_EXTENSION_SOURCE}/*.toml"
@@ -153,6 +153,7 @@ if(OCS_BUILD_BLENDER_EXTENSION AND WIN32)
             add_custom_target(blender-extension-test
                 COMMAND "${OCS_BLENDER_EXECUTABLE}"
                         --background --factory-startup
+                        --python-exit-code 1
                         --python
                         "${CMAKE_CURRENT_SOURCE_DIR}/tests/blender_extension_smoke.py"
                         -- --extension-stage "${OCS_EXTENSION_STAGE}"
