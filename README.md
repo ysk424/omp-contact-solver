@@ -78,6 +78,29 @@ The MinGW build statically includes its GCC, C++, pthread and OpenMP runtimes,
 so `omp_contact_solver.dll` is the only non-system runtime file to distribute.
 An MSVC build uses the OpenMP/runtime components supplied with that toolchain.
 
+## Blender Extension
+
+The Windows x64 Blender Extension wraps the C ABI with `ctypes`. It assigns one
+Blender mesh as `SHELL`, evaluates one mesh as immutable `STATIC`, runs the CPU
+solver, and bakes the result as absolute Shape Keys. Rendering remains entirely
+in Blender; the DLL still has no rendering or GPU dependency.
+
+Configure with a Blender 4.2 or newer executable, then build and test the
+installable package:
+
+```powershell
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release `
+  -DOCS_BLENDER_EXECUTABLE="C:/path/to/blender.exe"
+cmake --build build --target blender-extension
+cmake --build build --target blender-extension-test
+```
+
+Install `build/packages/omp_contact_solver-0.1.0-windows-x64.zip` from
+**Edit > Preferences > Extensions > Install from Disk**. The controls are in
+**3D View > Sidebar > OMP Cloth**. Existing Shape Keys are never overwritten;
+use an unbaked mesh copy as `SHELL`. The Extension's **Clear Bake** command only
+removes a Shape Key datablock it owns.
+
 ## DLL API
 
 Include [`include/omp_contact_solver.h`](include/omp_contact_solver.h). The

@@ -4,6 +4,9 @@ project(omp_contact_solver VERSION 0.1.0 LANGUAGES C CXX)
 
 option(OCS_BUILD_TESTS "Build the solver tests" ON)
 option(OCS_BUILD_EXAMPLES "Build the examples" ON)
+option(OCS_BUILD_BLENDER_EXTENSION "Enable Blender Extension staging" ON)
+set(OCS_BLENDER_EXECUTABLE "" CACHE FILEPATH
+    "Blender executable used to package and test the Extension")
 
 find_package(OpenMP REQUIRED COMPONENTS CXX)
 
@@ -97,6 +100,73 @@ if(OCS_BUILD_EXAMPLES)
     add_executable(drop_cloth examples/drop_cloth.cpp)
     target_compile_features(drop_cloth PRIVATE cxx_std_17)
     target_link_libraries(drop_cloth PRIVATE omp_contact_solver)
+endif()
+
+if(OCS_BUILD_BLENDER_EXTENSION AND WIN32)
+    set(OCS_EXTENSION_SOURCE
+        "${CMAKE_CURRENT_SOURCE_DIR}/blender_extension/omp_contact_solver")
+    set(OCS_EXTENSION_STAGE
+        "${CMAKE_BINARY_DIR}/blender-extension/omp_contact_solver")
+    set(OCS_EXTENSION_PACKAGE_DIR "${CMAKE_BINARY_DIR}/packages")
+    set(OCS_EXTENSION_PACKAGE
+        "${OCS_EXTENSION_PACKAGE_DIR}/omp_contact_solver-0.1.0-windows-x64.zip")
+    file(GLOB OCS_EXTENSION_FILES CONFIGURE_DEPENDS
+        "${OCS_EXTENSION_SOURCE}/*.py"
+        "${OCS_EXTENSION_SOURCE}/*.toml"
+        "${OCS_EXTENSION_SOURCE}/README.md"
+        "${OCS_EXTENSION_SOURCE}/LICENSE")
+
+    add_custom_command(
+        OUTPUT "${OCS_EXTENSION_STAGE}/.stage-complete"
+        COMMAND "${CMAKE_COMMAND}"
+            "-DOCS_EXTENSION_SOURCE=${OCS_EXTENSION_SOURCE}"
+            "-DOCS_EXTENSION_STAGE=${OCS_EXTENSION_STAGE}"
+            "-DOCS_SOLVER_LIBRARY=$<TARGET_FILE:omp_contact_solver>"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/stage_blender_extension.cmake"
+        DEPENDS omp_contact_solver ${OCS_EXTENSION_FILES}
+        BYPRODUCTS
+            "${OCS_EXTENSION_STAGE}/blender_manifest.toml"
+            "${OCS_EXTENSION_STAGE}/bin/omp_contact_solver.dll"
+        COMMENT "Staging the Blender Extension with its solver DLL"
+        VERBATIM
+    )
+    add_custom_target(stage-blender-extension
+        DEPENDS "${OCS_EXTENSION_STAGE}/.stage-complete")
+
+    if(OCS_BLENDER_EXECUTABLE)
+        if(NOT EXISTS "${OCS_BLENDER_EXECUTABLE}")
+            message(FATAL_ERROR
+                "OCS_BLENDER_EXECUTABLE does not exist: ${OCS_BLENDER_EXECUTABLE}")
+        endif()
+        add_custom_target(blender-extension
+            COMMAND "${CMAKE_COMMAND}" -E make_directory
+                    "${OCS_EXTENSION_PACKAGE_DIR}"
+            COMMAND "${OCS_BLENDER_EXECUTABLE}" --command extension build
+                    --source-dir "${OCS_EXTENSION_STAGE}"
+                    --output-filepath "${OCS_EXTENSION_PACKAGE}"
+            DEPENDS stage-blender-extension
+            BYPRODUCTS "${OCS_EXTENSION_PACKAGE}"
+            COMMENT "Building the installable Blender Extension package"
+            VERBATIM
+        )
+        if(OCS_BUILD_TESTS)
+            add_custom_target(blender-extension-test
+                COMMAND "${OCS_BLENDER_EXECUTABLE}"
+                        --background --factory-startup
+                        --python
+                        "${CMAKE_CURRENT_SOURCE_DIR}/tests/blender_extension_smoke.py"
+                        -- --extension-stage "${OCS_EXTENSION_STAGE}"
+                DEPENDS stage-blender-extension
+                COMMENT "Running the Blender Extension smoke test"
+                VERBATIM
+            )
+        endif()
+    else()
+        message(STATUS
+            "Set OCS_BLENDER_EXECUTABLE to enable blender-extension packaging and tests")
+    endif()
+elseif(OCS_BUILD_BLENDER_EXTENSION)
+    message(STATUS "The bundled Blender Extension currently targets Windows x64")
 endif()
 
 include(GNUInstallDirs)

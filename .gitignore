@@ -1,5 +1,6 @@
 /build*/
 /.cache/
+__pycache__/
 *.dll
 *.so
 *.dylib
@@ -8,4 +9,3 @@
 *.exp
 *.obj
 *.o
-
