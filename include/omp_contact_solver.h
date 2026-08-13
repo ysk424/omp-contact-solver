@@ -34,8 +34,9 @@ typedef struct OcsTriangle {
     uint32_t i2;
 } OcsTriangle;
 
-/* A non-stretching thread between two SHELL vertices. Rest length is captured
- * from the SHELL positions during ocsBuild(). */
+/* A finite-stiffness seam between two SHELL vertices. Rest length is captured
+ * from the SHELL positions during ocsBuild() and solved with the other
+ * Projective Dynamics constraints. */
 typedef struct OcsSeam {
     uint32_t i0;
     uint32_t i1;

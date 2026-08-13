@@ -29,12 +29,14 @@ Intentionally unsupported:
 
 The elastic step is Projective Dynamics. Unique triangle edges provide stretch
 constraints; the two opposite vertices of each interior edge provide the
-compact bending constraint. The global system is solved by a Jacobi-
-preconditioned, OpenMP-parallel matrix-free PCG. STATIC triangles are stored in
-an immutable median-split BVH. A swept vertex-triangle test catches crossings,
-and a closest-point projection maintains the requested cloth thickness. Seam
-threads use their captured rest length and a dedicated non-stretching
-projection after contact.
+compact bending constraint. The global system is solved by a symmetric Gauss-
+Seidel-preconditioned, OpenMP-parallel matrix-free PCG. STATIC triangles are
+stored in an immutable median-split BVH. Swept vertex-triangle and closest-point
+queries supply finite contact targets to the same global solve; a final safety
+projection maintains the requested cloth thickness. Seam threads use their
+captured rest length, finite stiffness, and the same Projective Dynamics
+local/global solve as stretch and contact. There is no post-solve seam
+projection.
 
 ## Build
 
@@ -98,15 +100,15 @@ cmake --build build --target blender-extension
 cmake --build build --target blender-extension-test
 ```
 
-Install `build/packages/omp_contact_solver-0.3.0-windows-x64.zip` from
+Install `build/packages/omp_contact_solver-0.3.1-windows-x64.zip` from
 **Edit > Preferences > Extensions > Install from Disk**. The controls are in
 **3D View > Sidebar > OMP Cloth**. Assign source meshes, then use **Prepare
 Simulation Copies**. The Extension evaluates both sources at the first bake
 frame into a separate `OMP Contact Simulation` collection. It applies the
 source modifiers, triangulates the prepared `STATIC`, and omits triangles below
 the native solver's area tolerance. It also pairs nearby boundary vertices from
-disconnected SHELL parts as high-strength seam threads without merging the
-mesh. Baking and clearing then operate only on the prepared `SHELL`; source
+disconnected SHELL parts as finite high-strength seam threads without merging
+the mesh. Baking and clearing then operate only on the prepared `SHELL`; source
 meshes and their existing Shape Keys are not overwritten.
 
 ## DLL API

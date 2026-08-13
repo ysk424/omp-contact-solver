@@ -17,6 +17,7 @@ namespace ocs {
 namespace {
 
 constexpr float kEpsilon = 1.0e-7f;
+constexpr float kContactWeightScale = 2.0f;
 constexpr uint32_t kLeafTriangles = 8;
 /* Below this size, OpenMP launch and reduction overhead costs more than the
  * arithmetic. Larger production meshes still take every parallel path. */
@@ -441,8 +442,11 @@ bool Solver::build() {
     substep_start_.resize(n);
     predicted_.resize(n);
     iterate_.resize(n);
+    contact_targets_.resize(n);
     contact_normals_.resize(n);
     contacted_.resize(n);
+    active_contacts_.resize(n);
+    contact_weight_ = material_.stretch_stiffness * kContactWeightScale;
     built_ = true;
     return true;
 }
@@ -508,7 +512,7 @@ bool Solver::build_shell_constraints() {
     }
 
     constraints_.clear();
-    constraints_.reserve(edges.size() * 2u);
+    constraints_.reserve(edges.size() * 2u + shell_seams_.size());
     for (const auto &entry : edges) {
         const EdgeRecord &e = entry.second;
         const float rest = length(rest_positions_[e.a] - rest_positions_[e.b]);
@@ -528,8 +532,6 @@ bool Solver::build_shell_constraints() {
         }
     }
 
-    seam_constraints_.clear();
-    seam_constraints_.reserve(shell_seams_.size());
     std::unordered_set<uint64_t> seam_keys;
     seam_keys.reserve(shell_seams_.size());
     for (const OcsSeam &seam : shell_seams_) {
@@ -548,7 +550,7 @@ bool Solver::build_shell_constraints() {
             error_ = "SHELL contains a zero-length seam";
             return false;
         }
-        seam_constraints_.push_back(
+        constraints_.push_back(
             {seam.i0, seam.i1, rest, seam.stiffness});
     }
 
@@ -582,6 +584,7 @@ void Solver::apply_system(const std::vector<Vec3> &x, float inv_h2,
             const Constraint &c = constraints_[inc.constraint];
             value += (x[vi] - x[inc.other]) * c.weight;
         }
+        if (active_contacts_[vi]) value += x[vi] * contact_weight_;
         out[vi] = value;
     }
 }
@@ -599,6 +602,36 @@ double Solver::parallel_dot(const std::vector<Vec3> &a,
     return sum;
 }
 
+void Solver::apply_preconditioner(const std::vector<Vec3> &residual,
+                                  std::vector<Vec3> &out) const {
+    // Symmetric Gauss-Seidel is an SPD preconditioner for the SPD Projective
+    // Dynamics matrix. The two triangular sweeps are deliberately serial:
+    // they are inexpensive compared with the parallel matrix products and
+    // remove the slow convergence caused by very stiff, short seam links.
+    for (size_t vi = 0; vi < residual.size(); ++vi) {
+        Vec3 value = residual[vi];
+        for (uint32_t k = incidence_offsets_[vi];
+             k < incidence_offsets_[vi + 1u]; ++k) {
+            const Incidence &inc = incidence_[k];
+            if (inc.other < vi) {
+                value += out[inc.other] * constraints_[inc.constraint].weight;
+            }
+        }
+        out[vi] = value / pcg_diag_[vi];
+    }
+    for (size_t reverse = residual.size(); reverse-- > 0u;) {
+        Vec3 value = out[reverse] * pcg_diag_[reverse];
+        for (uint32_t k = incidence_offsets_[reverse];
+             k < incidence_offsets_[reverse + 1u]; ++k) {
+            const Incidence &inc = incidence_[k];
+            if (inc.other > reverse) {
+                value += out[inc.other] * constraints_[inc.constraint].weight;
+            }
+        }
+        out[reverse] = value / pcg_diag_[reverse];
+    }
+}
+
 bool Solver::solve_pcg(const std::vector<Vec3> &rhs, float inv_h2,
                        std::vector<Vec3> &x) {
     const int64_t n = static_cast<int64_t>(x.size());
@@ -611,11 +644,12 @@ bool Solver::solve_pcg(const std::vector<Vec3> &rhs, float inv_h2,
             const Incidence &inc = incidence_[k];
             diagonal += constraints_[inc.constraint].weight;
         }
+        if (active_contacts_[i]) diagonal += contact_weight_;
         pcg_diag_[i] = diagonal;
         pcg_r_[i] = rhs[i] - pcg_ap_[i];
-        pcg_z_[i] = pcg_r_[i] / diagonal;
-        pcg_p_[i] = pcg_z_[i];
     }
+    apply_preconditioner(pcg_r_, pcg_z_);
+    pcg_p_ = pcg_z_;
     const double rhs_norm = std::sqrt(std::max(parallel_dot(rhs, rhs), 1.0e-30));
     double rz = parallel_dot(pcg_r_, pcg_z_);
     double relative = std::sqrt(std::max(parallel_dot(pcg_r_, pcg_r_), 0.0)) /
@@ -651,8 +685,7 @@ bool Solver::solve_pcg(const std::vector<Vec3> &rhs, float inv_h2,
         }
         if (relative <= desc_.pcg_relative_tolerance) break;
 
-#pragma omp parallel for schedule(static) num_threads(threads_) if(n > kParallelThreshold)
-        for (int64_t i = 0; i < n; ++i) pcg_z_[i] = pcg_r_[i] / pcg_diag_[i];
+        apply_preconditioner(pcg_r_, pcg_z_);
         const double rz_next = parallel_dot(pcg_r_, pcg_z_);
         if (!std::isfinite(rz_next)) {
             error_ = "PCG preconditioner produced a non-finite value";
@@ -723,28 +756,6 @@ uint64_t Solver::resolve_collisions(const std::vector<Vec3> &from,
     return contacts;
 }
 
-void Solver::project_seams(std::vector<Vec3> &positions) const {
-    const float structural = std::max(material_.stretch_stiffness, kEpsilon);
-    for (const Constraint &seam : seam_constraints_) {
-        Vec3 delta = positions[seam.a] - positions[seam.b];
-        float distance = length(delta);
-        if (!(distance > kEpsilon)) {
-            delta = rest_positions_[seam.a] - rest_positions_[seam.b];
-            distance = std::max(length(delta), kEpsilon);
-        }
-        const float inverse_a = 1.0f / masses_[seam.a];
-        const float inverse_b = 1.0f / masses_[seam.b];
-        const float inverse_sum = inverse_a + inverse_b;
-        const float relaxation =
-            std::clamp(seam.weight / (seam.weight + structural), 0.0f, 1.0f);
-        const Vec3 correction =
-            delta * (relaxation * (distance - seam.rest_length) /
-                     (distance * inverse_sum));
-        positions[seam.a] -= correction * inverse_a;
-        positions[seam.b] += correction * inverse_b;
-    }
-}
-
 bool Solver::step(float frame_dt) {
     error_.clear();
     stats_ = {};
@@ -785,6 +796,10 @@ bool Solver::step(float frame_dt) {
                                                              rest_positions_[c.b]),
                                                       kEpsilon));
             }
+            contact_targets_ = iterate_;
+            std::fill(active_contacts_.begin(), active_contacts_.end(), 0u);
+            stats_.contacts += resolve_collisions(
+                substep_start_, contact_targets_, contact_normals_, active_contacts_);
 #pragma omp parallel for schedule(static) num_threads(threads_) if(n > kParallelThreshold)
             for (int64_t vi = 0; vi < n; ++vi) {
                 Vec3 value = predicted_[vi] * (masses_[vi] * inv_h2);
@@ -793,19 +808,21 @@ bool Solver::step(float frame_dt) {
                     const Incidence &inc = incidence_[k];
                     value += projection_[inc.constraint] * inc.sign;
                 }
+                if (active_contacts_[vi]) {
+                    value += contact_targets_[vi] * contact_weight_;
+                    contacted_[vi] = 1u;
+                }
                 rhs_[vi] = value;
             }
             if (!solve_pcg(rhs_, inv_h2, iterate_)) return false;
-            project_seams(iterate_);
-            for (uint32_t collision_pass = 0;
-                 collision_pass < desc_.collision_iterations; ++collision_pass) {
-                stats_.contacts +=
-                    resolve_collisions(substep_start_, iterate_, contact_normals_, contacted_);
-                if (collision_pass + 1u < desc_.collision_iterations) {
-                    project_seams(iterate_);
-                }
-            }
-            project_seams(iterate_);
+        }
+
+        // Keep the public result outside STATIC even when a finite contact
+        // penalty leaves a small residual penetration after the global solve.
+        for (uint32_t collision_pass = 0;
+             collision_pass < desc_.collision_iterations; ++collision_pass) {
+            stats_.contacts +=
+                resolve_collisions(substep_start_, iterate_, contact_normals_, contacted_);
         }
 
 #pragma omp parallel for schedule(static) num_threads(threads_) if(n > kParallelThreshold)

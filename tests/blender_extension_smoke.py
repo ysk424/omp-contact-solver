@@ -85,6 +85,7 @@ def main():
             evaluated.to_mesh_clear()
 
         settings = bpy.context.scene.ocs_settings
+        assert settings.seam_stiffness == 100000.0
         settings.shell_object = shell
         settings.static_object = static
         settings.frame_start = 1
@@ -93,7 +94,7 @@ def main():
         settings.thickness = 0.02
         settings.seam_enabled = True
         settings.seam_search_distance = 0.01
-        settings.seam_stiffness = 10000000.0
+        settings.seam_stiffness = 100000.0
 
         assert bpy.ops.ocs.prepare() == {"FINISHED"}
         prepared_shell = settings.prepared_shell_object
@@ -137,9 +138,14 @@ def main():
         assert len(keys.key_blocks) == 24
         assert keys.use_relative is False
         final_points = keys.key_blocks[-1].data
+        maximum_seam_relative_error = 0.0
         for (a, b), rest_length in zip(seam_pairs, seam_rest_lengths):
             final_length = math.dist(tuple(final_points[a].co), tuple(final_points[b].co))
-            assert abs(final_length / rest_length - 1.0) < 1.0e-3
+            relative_error = abs(final_length / rest_length - 1.0)
+            maximum_seam_relative_error = max(
+                maximum_seam_relative_error, relative_error
+            )
+            assert relative_error < 0.1
         final_height = min(
             (prepared_shell.matrix_world @ point.co).z
             for point in keys.key_blocks[-1].data
@@ -160,6 +166,7 @@ def main():
         print(
             "Blender Extension preparation smoke test passed: "
             f"OpenMP={get_library().openmp_enabled}, skipped_static=1, "
+            f"seam_max_error={maximum_seam_relative_error:.6f}, "
             f"final_min_z={final_height:.6f}"
         )
     finally:

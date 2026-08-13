@@ -1,7 +1,7 @@
 schema_version = "1.0.0"
 
 id = "omp_contact_solver"
-version = "0.3.0"
+version = "0.3.1"
 name = "OMP Contact Solver"
 tagline = "Bake CPU OpenMP cloth against static meshes"
 maintainer = "ysk424"

@@ -129,13 +129,14 @@ private:
                    std::vector<Vec3> &x);
     void apply_system(const std::vector<Vec3> &x, float inv_h2,
                       std::vector<Vec3> &out) const;
+    void apply_preconditioner(const std::vector<Vec3> &residual,
+                              std::vector<Vec3> &out) const;
     double parallel_dot(const std::vector<Vec3> &a,
                         const std::vector<Vec3> &b) const;
     uint64_t resolve_collisions(const std::vector<Vec3> &from,
                                 std::vector<Vec3> &positions,
                                 std::vector<Vec3> &contact_normals,
                                 std::vector<uint8_t> &contacted) const;
-    void project_seams(std::vector<Vec3> &positions) const;
     bool finite_state() const;
 
     OcsSolverDesc desc_{};
@@ -153,7 +154,6 @@ private:
     std::vector<Vec3> velocities_;
     std::vector<float> masses_;
     std::vector<Constraint> constraints_;
-    std::vector<Constraint> seam_constraints_;
     std::vector<uint32_t> incidence_offsets_;
     std::vector<Incidence> incidence_;
     StaticBvh static_bvh_;
@@ -168,8 +168,11 @@ private:
     std::vector<Vec3> substep_start_;
     std::vector<Vec3> predicted_;
     std::vector<Vec3> iterate_;
+    std::vector<Vec3> contact_targets_;
     std::vector<Vec3> contact_normals_;
     std::vector<uint8_t> contacted_;
+    std::vector<uint8_t> active_contacts_;
+    float contact_weight_ = 0.0f;
 
     StepStats stats_{};
     std::string error_;

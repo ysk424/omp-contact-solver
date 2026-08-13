@@ -22,10 +22,12 @@ Bake** only removes a Shape Key datablock created and owned by this Extension;
 **Clear Prepared** removes the generated collection objects and restores source
 `SHELL` visibility.
 
-**Auto Seam Threads** preserves each detected pair's initial distance without
-merging vertices, so UVs and materials remain intact. **Seam Distance** controls
-pair detection and requires running Prepare again after a change. The default
-thread stiffness is intentionally much higher than ordinary cloth Stretch.
+**Auto Seam Threads** gives each detected pair a finite Projective Dynamics
+constraint at its initial distance without merging vertices, so UVs and
+materials remain intact. **Seam Distance** controls pair detection and requires
+running Prepare again after a change. The default thread stiffness is higher
+than ordinary cloth Stretch, but it is solved together with cloth and contact;
+there is no forced seam correction after contact.
 
 The current solver intentionally has no pins, self-collision, moving STATIC
 geometry, GPU backend, or renderer.

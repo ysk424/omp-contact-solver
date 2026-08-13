@@ -435,8 +435,8 @@ class OCS_Settings(PropertyGroup):
     )
     seam_stiffness: FloatProperty(
         name="Seam Stiffness",
-        description="Non-stretching thread strength applied to detected seam pairs",
-        default=10000000.0,
+        description="Finite seam strength solved together with cloth and contact constraints",
+        default=100000.0,
         min=1.0,
         max=1.0e9,
     )
