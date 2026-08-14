@@ -173,6 +173,68 @@ void test_seam_thread() {
             "strong finite seam must keep strain below five percent");
 }
 
+void test_triangle_strain_limit() {
+    const OcsVec3 wall_vertices[] = {
+        {0.0f, -2.0f, -2.0f}, {0.0f, 2.0f, -2.0f},
+        {0.0f, 2.0f, 2.0f}, {0.0f, -2.0f, 2.0f}};
+    const OcsTriangle wall_triangles[] = {{0, 1, 2}, {0, 2, 3}};
+    const OcsVec3 shell_vertices[] = {
+        {-0.001f, -0.5f, 0.0f}, {0.5f, -0.5f, 0.0f},
+        {0.5f, 0.5f, 0.0f}};
+    const OcsTriangle shell_triangle[] = {{0, 1, 2}};
+
+    auto run = [&](float limit, float stiffness, uint64_t *projections) {
+        OcsSolverDesc desc;
+        ocsDefaultSolverDesc(&desc);
+        desc.gravity = {0.0f, 0.0f, 0.0f};
+        desc.substeps = 4;
+        desc.pd_iterations = 8;
+        desc.pcg_iterations = 300;
+        desc.thread_count = 2;
+        OcsSolver *solver = ocsCreate(&desc);
+        require(solver != nullptr, "create strain-limit solver");
+        require_ok(ocsSetStaticMesh(solver, wall_vertices, 4,
+                                    wall_triangles, 2),
+                   solver, "set strain-limit wall");
+        OcsShellMaterial material;
+        ocsDefaultShellMaterial(&material);
+        material.stretch_stiffness = 1.0f;
+        material.bend_stiffness = 0.0f;
+        material.thickness = 0.2f;
+        material.strain_limit = limit;
+        material.strain_limit_stiffness = stiffness;
+        require_ok(ocsSetShellMesh(solver, shell_vertices, 3,
+                                   shell_triangle, 1, &material),
+                   solver, "set strain-limit SHELL");
+        require_ok(ocsBuild(solver), solver, "build strain-limit solver");
+        OcsStepStats stats{};
+        for (int frame = 0; frame < 10; ++frame) {
+            require_ok(ocsStep(solver, 1.0f / 24.0f), solver,
+                       "strain-limit step");
+            stats.struct_size = sizeof(stats);
+            require_ok(ocsGetLastStepStats(solver, &stats), solver,
+                       "strain-limit stats");
+            *projections += stats.strain_limit_projection_count;
+        }
+        const float maximum = stats.maximum_principal_stretch;
+        ocsDestroy(solver);
+        return maximum;
+    };
+
+    uint64_t disabled_projections = 0u;
+    uint64_t enabled_projections = 0u;
+    const float unlimited = run(0.0f, 0.0f, &disabled_projections);
+    const float limited = run(0.05f, 10000.0f, &enabled_projections);
+    require(unlimited > 2.0f,
+            "stress scene must visibly stretch without the limiter");
+    require(limited <= 1.06f,
+            "five-percent triangle strain limit must bound principal stretch");
+    require(limited < unlimited * 0.5f,
+            "triangle strain limit must materially reduce stretch");
+    require(disabled_projections == 0u && enabled_projections > 0u,
+            "strain-limit statistics must report active projections");
+}
+
 void test_invalid_mesh() {
     OcsSolver *solver = ocsCreate(nullptr);
     require(solver != nullptr, "create invalid-mesh solver");
@@ -338,6 +400,7 @@ int main() {
     test_free_fall();
     test_static_floor_contact();
     test_seam_thread();
+    test_triangle_strain_limit();
     test_invalid_mesh();
     test_openmp_sized_mesh();
     test_swept_floor_contact();

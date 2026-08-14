@@ -43,8 +43,11 @@ def main():
                 (10, 10, 0),
                 (10.0001, 10, 0),
                 (10, 10.0001, 0),
+                (20, 20, 2),
+                (21, 20, 2),
+                (20, 21, 2),
             ],
-            [(0, 1, 2), (0, 2, 3), (4, 5, 6)],
+            [(0, 1, 2), (0, 2, 3), (4, 5, 6), (7, 8, 9)],
         )
         shell = create_mesh_object(
             "OCS_Test_SHELL",
@@ -94,8 +97,13 @@ def main():
 
         settings = bpy.context.scene.ocs_settings
         assert settings.seam_stiffness == 100000.0
+        assert settings.strain_limit_enabled
+        assert settings.strain_limit_percent == 5.0
         settings.shell_object = shell
         settings.static_object = static
+        settings.static_crop_enabled = True
+        settings.static_crop_min_z = -0.5
+        settings.static_crop_max_z = 0.5
         settings.frame_start = 1
         settings.frame_end = 24
         settings.substeps = 4
@@ -116,6 +124,7 @@ def main():
         assert prepared_static.hide_viewport is False
         assert prepared_static.hide_get() is False
         assert "Animated Body Deformation" in prepared_static.modifiers
+        assert "OMP Static Crop" in prepared_static.modifiers
         prepared_collection_name = prepared_collection.name
         assert tuple(prepared_shell.matrix_world) == tuple(
             type(prepared_shell.matrix_world).Identity(4)
@@ -130,7 +139,17 @@ def main():
         for actual, expected in zip(actual_shell_positions, expected_shell_positions):
             assert max(abs(a - b) for a, b in zip(actual, expected)) < 1.0e-6
         prepared_static.data.calc_loop_triangles()
-        assert len(prepared_static.data.loop_triangles) == 3
+        assert len(prepared_static.data.loop_triangles) == 4
+        depsgraph = bpy.context.evaluated_depsgraph_get()
+        evaluated_static = prepared_static.evaluated_get(depsgraph)
+        evaluated_static_mesh = evaluated_static.to_mesh(depsgraph=depsgraph)
+        try:
+            assert len(evaluated_static_mesh.polygons) == 3
+            assert len(evaluated_static_mesh.vertices) == 7
+        finally:
+            evaluated_static.to_mesh_clear()
+        assert settings.last_static_crop_vertices == "7 / 10"
+        assert settings.last_static_crop_polygons == "3 / 4"
         assert settings.last_prepare_skipped == 1
         assert settings.last_seam_count == 2
         seam_pairs = [(1, 4), (2, 7)]
@@ -182,6 +201,7 @@ def main():
             "Blender Extension preparation smoke test passed: "
             f"OpenMP={get_library().openmp_enabled}, skipped_static=1, "
             f"animated_static_delta={animated_static_z - 0.1:.3f}, "
+            f"static_crop={settings.last_static_crop_polygons}, "
             f"seam_max_error={maximum_seam_relative_error:.6f}, "
             f"final_min_z={final_height:.6f}"
         )

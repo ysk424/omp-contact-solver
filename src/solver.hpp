@@ -97,12 +97,31 @@ struct Incidence {
     float sign = 1.0f;
 };
 
+struct StrainConstraint {
+    uint32_t vertex[3]{};
+    float gradient[3][2]{};
+    float system[3][3]{};
+    float weighted_area = 0.0f;
+    float maximum_stretch = 1.0f;
+};
+
+struct StrainIncidence {
+    uint32_t constraint = 0;
+    uint32_t local_vertex = 0;
+};
+
+struct StrainProjection {
+    Vec3 column[2];
+};
+
 struct StepStats {
     uint32_t substeps = 0;
     uint32_t pd_iterations = 0;
     uint64_t pcg_iterations = 0;
     uint64_t contacts = 0;
+    uint64_t strain_limit_projections = 0;
     float residual = 0.0f;
+    float maximum_principal_stretch = 1.0f;
 };
 
 class Solver {
@@ -133,6 +152,11 @@ public:
 
 private:
     bool build_shell_constraints();
+    bool build_strain_constraints();
+    float project_strain_constraints(const std::vector<Vec3> &positions,
+                                     uint64_t *limited_count);
+    void update_strain_duals(const std::vector<Vec3> &positions);
+    float maximum_principal_stretch(const std::vector<Vec3> &positions) const;
     bool solve_pcg(const std::vector<Vec3> &rhs, float inv_h2,
                    std::vector<Vec3> &x);
     void apply_system(const std::vector<Vec3> &x, float inv_h2,
@@ -166,9 +190,14 @@ private:
     std::vector<Constraint> constraints_;
     std::vector<uint32_t> incidence_offsets_;
     std::vector<Incidence> incidence_;
+    std::vector<StrainConstraint> strain_constraints_;
+    std::vector<uint32_t> strain_incidence_offsets_;
+    std::vector<StrainIncidence> strain_incidence_;
     StaticBvh static_bvh_;
 
     std::vector<Vec3> projection_;
+    std::vector<StrainProjection> strain_projection_;
+    std::vector<StrainProjection> strain_dual_;
     std::vector<Vec3> rhs_;
     std::vector<Vec3> pcg_r_;
     std::vector<Vec3> pcg_z_;

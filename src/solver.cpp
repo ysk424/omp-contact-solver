@@ -163,6 +163,51 @@ float component(Vec3 v, int axis) {
     return axis == 0 ? v.x : (axis == 1 ? v.y : v.z);
 }
 
+float project_triangle_strain(Vec3 f0, Vec3 f1, float maximum_stretch,
+                              Vec3 &p0, Vec3 &p1) {
+    const float c00 = dot(f0, f0);
+    const float c01 = dot(f0, f1);
+    const float c11 = dot(f1, f1);
+    const float discriminant = std::sqrt(std::max(
+        (c00 - c11) * (c00 - c11) + 4.0f * c01 * c01, 0.0f));
+    const float lambda0 = std::max(0.5f * (c00 + c11 + discriminant), 0.0f);
+    const float lambda1 = std::max(0.5f * (c00 + c11 - discriminant), 0.0f);
+    const float sigma0 = std::sqrt(lambda0);
+    const float sigma1 = std::sqrt(lambda1);
+    if (!(sigma0 > maximum_stretch)) {
+        p0 = f0;
+        p1 = f1;
+        return sigma0;
+    }
+
+    float vx = 1.0f;
+    float vy = 0.0f;
+    if (std::abs(c01) > kEpsilon) {
+        vx = c01;
+        vy = lambda0 - c00;
+        const float inverse_length =
+            1.0f / std::sqrt(std::max(vx * vx + vy * vy, kEpsilon));
+        vx *= inverse_length;
+        vy *= inverse_length;
+    } else if (c11 > c00) {
+        vx = 0.0f;
+        vy = 1.0f;
+    }
+
+    const float scale0 = maximum_stretch / sigma0;
+    const float scale1 = sigma1 > kEpsilon
+                             ? std::min(1.0f, maximum_stretch / sigma1)
+                             : 1.0f;
+    const float wx = -vy;
+    const float wy = vx;
+    const float q00 = scale0 * vx * vx + scale1 * wx * wx;
+    const float q01 = scale0 * vx * vy + scale1 * wx * wy;
+    const float q11 = scale0 * vy * vy + scale1 * wy * wy;
+    p0 = f0 * q00 + f1 * q01;
+    p1 = f0 * q01 + f1 * q11;
+    return sigma0;
+}
+
 } // namespace
 
 Vec3 operator+(Vec3 a, Vec3 b) { return {a.x + b.x, a.y + b.y, a.z + b.z}; }
@@ -506,9 +551,11 @@ bool Solver::build() {
         return false;
     }
     if (!static_bvh_.build(static_vertices_, static_triangles_, error_)) return false;
-    if (!build_shell_constraints()) return false;
+    if (!build_shell_constraints() || !build_strain_constraints()) return false;
     const size_t n = positions_.size();
     projection_.resize(constraints_.size());
+    strain_projection_.resize(strain_constraints_.size());
+    strain_dual_.resize(strain_constraints_.size());
     rhs_.resize(n);
     pcg_r_.resize(n);
     pcg_z_.resize(n);
@@ -523,6 +570,12 @@ bool Solver::build() {
     contacted_.resize(n);
     active_contacts_.resize(n);
     contact_weight_ = material_.stretch_stiffness * kContactWeightScale;
+    if (material_.strain_limit > 0.0f &&
+        material_.strain_limit_stiffness > 0.0f) {
+        contact_weight_ = std::max(
+            contact_weight_,
+            material_.strain_limit_stiffness * kContactWeightScale);
+    }
     static_target_vertices_ = static_vertices_;
     static_substep_vertices_.resize(static_vertices_.size());
     static_update_pending_ = false;
@@ -651,6 +704,156 @@ bool Solver::build_shell_constraints() {
     return true;
 }
 
+bool Solver::build_strain_constraints() {
+    strain_constraints_.clear();
+    strain_constraints_.reserve(shell_triangles_.size());
+    const bool enabled = material_.strain_limit > 0.0f &&
+                         material_.strain_limit_stiffness > 0.0f;
+
+    for (const OcsTriangle &triangle : shell_triangles_) {
+        const uint32_t vertex[3] = {triangle.i0, triangle.i1, triangle.i2};
+        const Vec3 x0 = rest_positions_[vertex[0]];
+        const Vec3 e1 = rest_positions_[vertex[1]] - x0;
+        const Vec3 e2 = rest_positions_[vertex[2]] - x0;
+        const float e1_length = length(e1);
+        const Vec3 normal_unscaled = cross(e1, e2);
+        const float twice_area = length(normal_unscaled);
+        if (!(e1_length > kEpsilon) || !(twice_area > kEpsilon)) {
+            error_ = "SHELL contains a degenerate strain triangle";
+            return false;
+        }
+        const Vec3 tangent0 = e1 / e1_length;
+        const Vec3 normal = normal_unscaled / twice_area;
+        const Vec3 tangent1 = cross(normal, tangent0);
+        const float dm01 = dot(e2, tangent0);
+        const float dm11 = dot(e2, tangent1);
+        if (!(dm11 > kEpsilon)) {
+            error_ = "SHELL strain rest coordinates are singular";
+            return false;
+        }
+
+        const float inverse00 = 1.0f / e1_length;
+        const float inverse01 = -dm01 / (e1_length * dm11);
+        const float inverse10 = 0.0f;
+        const float inverse11 = 1.0f / dm11;
+        StrainConstraint constraint;
+        constraint.vertex[0] = vertex[0];
+        constraint.vertex[1] = vertex[1];
+        constraint.vertex[2] = vertex[2];
+        constraint.gradient[1][0] = inverse00;
+        constraint.gradient[1][1] = inverse01;
+        constraint.gradient[2][0] = inverse10;
+        constraint.gradient[2][1] = inverse11;
+        for (int axis = 0; axis < 2; ++axis) {
+            constraint.gradient[0][axis] =
+                -constraint.gradient[1][axis] - constraint.gradient[2][axis];
+        }
+        constraint.weighted_area =
+            enabled ? material_.strain_limit_stiffness * (0.5f * twice_area)
+                    : 0.0f;
+        constraint.maximum_stretch = 1.0f + material_.strain_limit;
+        for (int i = 0; i < 3; ++i) {
+            for (int j = 0; j < 3; ++j) {
+                constraint.system[i][j] = constraint.weighted_area *
+                    (constraint.gradient[i][0] * constraint.gradient[j][0] +
+                     constraint.gradient[i][1] * constraint.gradient[j][1]);
+            }
+        }
+        strain_constraints_.push_back(constraint);
+    }
+
+    strain_incidence_offsets_.assign(positions_.size() + 1u, 0u);
+    if (!enabled) {
+        strain_incidence_.clear();
+        return true;
+    }
+    for (const StrainConstraint &constraint : strain_constraints_) {
+        for (uint32_t local = 0; local < 3u; ++local) {
+            ++strain_incidence_offsets_[constraint.vertex[local] + 1u];
+        }
+    }
+    for (size_t i = 1; i < strain_incidence_offsets_.size(); ++i) {
+        strain_incidence_offsets_[i] += strain_incidence_offsets_[i - 1u];
+    }
+    strain_incidence_.resize(strain_constraints_.size() * 3u);
+    std::vector<uint32_t> cursor = strain_incidence_offsets_;
+    for (uint32_t ci = 0; ci < strain_constraints_.size(); ++ci) {
+        const StrainConstraint &constraint = strain_constraints_[ci];
+        for (uint32_t local = 0; local < 3u; ++local) {
+            strain_incidence_[cursor[constraint.vertex[local]]++] = {ci, local};
+        }
+    }
+    return true;
+}
+
+float Solver::project_strain_constraints(const std::vector<Vec3> &positions,
+                                         uint64_t *limited_count) {
+    const int64_t count = static_cast<int64_t>(strain_constraints_.size());
+    uint64_t limited = 0u;
+    float maximum = 1.0f;
+#pragma omp parallel for schedule(static) reduction(+ : limited) reduction(max : maximum) num_threads(threads_) if(count > kParallelThreshold)
+    for (int64_t ci = 0; ci < count; ++ci) {
+        const StrainConstraint &constraint = strain_constraints_[ci];
+        Vec3 f[2]{};
+        for (int local = 0; local < 3; ++local) {
+            const Vec3 x = positions[constraint.vertex[local]];
+            f[0] += x * constraint.gradient[local][0];
+            f[1] += x * constraint.gradient[local][1];
+        }
+        f[0] += strain_dual_[ci].column[0];
+        f[1] += strain_dual_[ci].column[1];
+        const float stretch = project_triangle_strain(
+            f[0], f[1], constraint.maximum_stretch,
+            strain_projection_[ci].column[0], strain_projection_[ci].column[1]);
+        maximum = std::max(maximum, stretch);
+        if (stretch > constraint.maximum_stretch) ++limited;
+    }
+    if (limited_count) *limited_count = limited;
+    return maximum;
+}
+
+void Solver::update_strain_duals(const std::vector<Vec3> &positions) {
+    const int64_t count = static_cast<int64_t>(strain_constraints_.size());
+#pragma omp parallel for schedule(static) num_threads(threads_) if(count > kParallelThreshold)
+    for (int64_t ci = 0; ci < count; ++ci) {
+        const StrainConstraint &constraint = strain_constraints_[ci];
+        Vec3 f[2]{};
+        for (int local = 0; local < 3; ++local) {
+            const Vec3 x = positions[constraint.vertex[local]];
+            f[0] += x * constraint.gradient[local][0];
+            f[1] += x * constraint.gradient[local][1];
+        }
+        strain_dual_[ci].column[0] +=
+            f[0] - strain_projection_[ci].column[0];
+        strain_dual_[ci].column[1] +=
+            f[1] - strain_projection_[ci].column[1];
+    }
+}
+
+float Solver::maximum_principal_stretch(const std::vector<Vec3> &positions) const {
+    const int64_t count = static_cast<int64_t>(strain_constraints_.size());
+    float maximum = 1.0f;
+#pragma omp parallel for schedule(static) reduction(max : maximum) num_threads(threads_) if(count > kParallelThreshold)
+    for (int64_t ci = 0; ci < count; ++ci) {
+        const StrainConstraint &constraint = strain_constraints_[ci];
+        Vec3 f0{};
+        Vec3 f1{};
+        for (int local = 0; local < 3; ++local) {
+            const Vec3 x = positions[constraint.vertex[local]];
+            f0 += x * constraint.gradient[local][0];
+            f1 += x * constraint.gradient[local][1];
+        }
+        const float c00 = dot(f0, f0);
+        const float c01 = dot(f0, f1);
+        const float c11 = dot(f1, f1);
+        const float discriminant = std::sqrt(std::max(
+            (c00 - c11) * (c00 - c11) + 4.0f * c01 * c01, 0.0f));
+        maximum = std::max(maximum,
+            std::sqrt(std::max(0.5f * (c00 + c11 + discriminant), 0.0f)));
+    }
+    return maximum;
+}
+
 void Solver::apply_system(const std::vector<Vec3> &x, float inv_h2,
                           std::vector<Vec3> &out) const {
     const int64_t n = static_cast<int64_t>(x.size());
@@ -662,6 +865,15 @@ void Solver::apply_system(const std::vector<Vec3> &x, float inv_h2,
             const Incidence &inc = incidence_[k];
             const Constraint &c = constraints_[inc.constraint];
             value += (x[vi] - x[inc.other]) * c.weight;
+        }
+        for (uint32_t k = strain_incidence_offsets_[vi];
+             k < strain_incidence_offsets_[vi + 1u]; ++k) {
+            const StrainIncidence &inc = strain_incidence_[k];
+            const StrainConstraint &constraint = strain_constraints_[inc.constraint];
+            for (uint32_t other = 0; other < 3u; ++other) {
+                value += x[constraint.vertex[other]] *
+                         constraint.system[inc.local_vertex][other];
+            }
         }
         if (active_contacts_[vi]) value += x[vi] * contact_weight_;
         out[vi] = value;
@@ -722,6 +934,13 @@ bool Solver::solve_pcg(const std::vector<Vec3> &rhs, float inv_h2,
              k < incidence_offsets_[i + 1u]; ++k) {
             const Incidence &inc = incidence_[k];
             diagonal += constraints_[inc.constraint].weight;
+        }
+        for (uint32_t k = strain_incidence_offsets_[i];
+             k < strain_incidence_offsets_[i + 1u]; ++k) {
+            const StrainIncidence &inc = strain_incidence_[k];
+            diagonal +=
+                strain_constraints_[inc.constraint].system[inc.local_vertex]
+                                                           [inc.local_vertex];
         }
         if (active_contacts_[i]) diagonal += contact_weight_;
         pcg_diag_[i] = diagonal;
@@ -850,6 +1069,10 @@ bool Solver::step(float frame_dt) {
     const int64_t n = static_cast<int64_t>(positions_.size());
     const int64_t nc = static_cast<int64_t>(constraints_.size());
     for (uint32_t substep = 0; substep < desc_.substeps; ++substep) {
+        if (!strain_incidence_.empty()) {
+            std::fill(strain_dual_.begin(), strain_dual_.end(),
+                      StrainProjection{});
+        }
         if (static_update_pending_) {
             const float alpha = static_cast<float>(substep + 1u) /
                                 static_cast<float>(desc_.substeps);
@@ -890,6 +1113,11 @@ bool Solver::step(float frame_dt) {
                                                              rest_positions_[c.b]),
                                                       kEpsilon));
             }
+            if (!strain_incidence_.empty()) {
+                uint64_t limited = 0u;
+                project_strain_constraints(iterate_, &limited);
+                stats_.strain_limit_projections += limited;
+            }
             contact_targets_ = iterate_;
             std::fill(active_contacts_.begin(), active_contacts_.end(), 0u);
             stats_.contacts += resolve_collisions(
@@ -902,6 +1130,21 @@ bool Solver::step(float frame_dt) {
                     const Incidence &inc = incidence_[k];
                     value += projection_[inc.constraint] * inc.sign;
                 }
+                for (uint32_t k = strain_incidence_offsets_[vi];
+                     k < strain_incidence_offsets_[vi + 1u]; ++k) {
+                    const StrainIncidence &inc = strain_incidence_[k];
+                    const StrainConstraint &constraint =
+                        strain_constraints_[inc.constraint];
+                    const StrainProjection &projection =
+                        strain_projection_[inc.constraint];
+                    const float gx = constraint.gradient[inc.local_vertex][0];
+                    const float gy = constraint.gradient[inc.local_vertex][1];
+                    value += ((projection.column[0] -
+                               strain_dual_[inc.constraint].column[0]) * gx +
+                              (projection.column[1] -
+                               strain_dual_[inc.constraint].column[1]) * gy) *
+                             constraint.weighted_area;
+                }
                 if (active_contacts_[vi]) {
                     value += contact_targets_[vi] * contact_weight_;
                     contacted_[vi] = 1u;
@@ -909,6 +1152,7 @@ bool Solver::step(float frame_dt) {
                 rhs_[vi] = value;
             }
             if (!solve_pcg(rhs_, inv_h2, iterate_)) return false;
+            if (!strain_incidence_.empty()) update_strain_duals(iterate_);
         }
 
         // Keep the public result outside STATIC even when a finite contact
@@ -940,6 +1184,7 @@ bool Solver::step(float frame_dt) {
         error_ = "solver produced a non-finite SHELL state";
         return false;
     }
+    stats_.maximum_principal_stretch = maximum_principal_stretch(positions_);
     if (static_update_pending_) {
         static_vertices_ = static_target_vertices_;
         static_update_pending_ = false;

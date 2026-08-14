@@ -18,7 +18,7 @@
 extern "C" {
 #endif
 
-#define OCS_ABI_VERSION 3u
+#define OCS_ABI_VERSION 4u
 
 typedef struct OcsSolver OcsSolver;
 
@@ -75,6 +75,11 @@ typedef struct OcsShellMaterial {
     float thickness;
     float friction;
     float restitution;
+    /* Maximum tensile principal strain as a fraction (0 disables it).
+     * For example, 0.05 limits the projected triangle stretch to 5%. */
+    float strain_limit;
+    /* Projective-Dynamics/ADMM penalty weight for strain convergence. */
+    float strain_limit_stiffness;
 } OcsShellMaterial;
 
 typedef struct OcsStepStats {
@@ -84,6 +89,8 @@ typedef struct OcsStepStats {
     uint64_t pcg_iterations;
     uint64_t contact_count;
     float final_pcg_relative_residual;
+    uint64_t strain_limit_projection_count;
+    float maximum_principal_stretch;
 } OcsStepStats;
 
 OCS_API uint32_t ocsGetAbiVersion(void);

@@ -30,7 +30,7 @@ bool valid_solver_desc(const OcsSolverDesc &d) {
            std::isfinite(d.gravity.z) &&
            std::isfinite(d.pcg_relative_tolerance) &&
            d.pcg_relative_tolerance > 0.0f &&
-           d.collision_iterations > 0 && std::isfinite(d.velocity_damping) &&
+           std::isfinite(d.velocity_damping) &&
            d.velocity_damping >= 0.0f && d.thread_count <= INT_MAX;
 }
 
@@ -39,10 +39,15 @@ bool valid_material(const OcsShellMaterial &m) {
            std::isfinite(m.density) && std::isfinite(m.stretch_stiffness) &&
            std::isfinite(m.bend_stiffness) && std::isfinite(m.thickness) &&
            std::isfinite(m.friction) && std::isfinite(m.restitution) &&
+           std::isfinite(m.strain_limit) &&
+           std::isfinite(m.strain_limit_stiffness) &&
            m.density > 0.0f &&
            m.stretch_stiffness > 0.0f && m.bend_stiffness >= 0.0f &&
            m.thickness >= 0.0f && m.friction >= 0.0f && m.friction <= 1.0f &&
-           m.restitution >= 0.0f && m.restitution <= 1.0f;
+           m.restitution >= 0.0f && m.restitution <= 1.0f &&
+           m.strain_limit >= 0.0f && m.strain_limit <= 10.0f &&
+           m.strain_limit_stiffness >= 0.0f &&
+           (m.strain_limit == 0.0f || m.strain_limit_stiffness > 0.0f);
 }
 
 } // namespace
@@ -83,6 +88,8 @@ void ocsDefaultShellMaterial(OcsShellMaterial *material) {
     material->thickness = 0.01f;
     material->friction = 0.35f;
     material->restitution = 0.0f;
+    material->strain_limit = 0.0f;
+    material->strain_limit_stiffness = 100000.0f;
 }
 
 OcsSolver *ocsCreate(const OcsSolverDesc *desc) {
@@ -277,6 +284,8 @@ OcsResult ocsGetLastStepStats(const OcsSolver *solver, OcsStepStats *stats) {
     stats->pcg_iterations = src.pcg_iterations;
     stats->contact_count = src.contacts;
     stats->final_pcg_relative_residual = src.residual;
+    stats->strain_limit_projection_count = src.strain_limit_projections;
+    stats->maximum_principal_stretch = src.maximum_principal_stretch;
     return OCS_OK;
 }
 

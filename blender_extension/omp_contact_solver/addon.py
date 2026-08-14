@@ -25,9 +25,14 @@ _PREPARED_SOURCE_TAG = "omp_contact_solver_source"
 _PREPARED_SEAMS_TAG = "omp_contact_solver_seam_pairs"
 _PREPARED_SEAM_DISTANCE_TAG = "omp_contact_solver_seam_distance"
 _PREPARED_SEAM_ENABLED_TAG = "omp_contact_solver_seam_enabled"
+_PREPARED_CROP_ENABLED_TAG = "omp_contact_solver_static_crop_enabled"
+_PREPARED_CROP_MIN_TAG = "omp_contact_solver_static_crop_min_z"
+_PREPARED_CROP_MAX_TAG = "omp_contact_solver_static_crop_max_z"
 _PREPARED_COLLECTION_NAME = "OMP Contact Simulation"
-_PREPARED_VERSION = 2
+_PREPARED_VERSION = 3
 _STATIC_TWICE_AREA_FILTER = 1.25e-7
+_STATIC_CROP_GROUP = "OMP_STATIC_CROP"
+_STATIC_CROP_MODIFIER = "OMP Static Crop"
 _BAKE_RUNNING = False
 
 
@@ -133,6 +138,49 @@ def _animated_static_copy(source, name):
     obj.display_type = "WIRE"
     obj.show_in_front = True
     return obj
+
+
+def _configure_static_crop(obj, depsgraph, minimum_z, maximum_z):
+    """Add a topology-stable final Mask selected in frame-one world space."""
+    if not minimum_z < maximum_z:
+        raise RuntimeError("STATIC crop minimum must be below its maximum")
+    evaluated = obj.evaluated_get(depsgraph)
+    mesh = evaluated.to_mesh(preserve_all_data_layers=False, depsgraph=depsgraph)
+    if mesh is None:
+        raise RuntimeError("STATIC could not be evaluated for cropping")
+    try:
+        if len(mesh.vertices) != len(obj.data.vertices):
+            raise RuntimeError(
+                "STATIC crop requires deformation-only source modifiers"
+            )
+        world_z = [
+            float((evaluated.matrix_world @ vertex.co).z)
+            for vertex in mesh.vertices
+        ]
+        selected = set()
+        kept_polygons = 0
+        for polygon in mesh.polygons:
+            heights = [world_z[index] for index in polygon.vertices]
+            if min(heights) <= maximum_z and max(heights) >= minimum_z:
+                selected.update(int(index) for index in polygon.vertices)
+                kept_polygons += 1
+        polygon_count = len(mesh.polygons)
+    finally:
+        evaluated.to_mesh_clear()
+    if not selected or kept_polygons == 0:
+        raise RuntimeError("STATIC crop box contains no body polygons")
+
+    # Vertex-group weights live in mesh custom data. Isolate the prepared copy
+    # so adding the crop never touches the user's source body.
+    obj.data = obj.data.copy()
+    group = obj.vertex_groups.get(_STATIC_CROP_GROUP)
+    if group is None:
+        group = obj.vertex_groups.new(name=_STATIC_CROP_GROUP)
+    group.add(sorted(selected), 1.0, "REPLACE")
+    modifier = obj.modifiers.new(name=_STATIC_CROP_MODIFIER, type="MASK")
+    modifier.vertex_group = group.name
+    modifier.invert_vertex_group = False
+    return len(selected), len(obj.data.vertices), kept_polygons, polygon_count
 
 
 def _is_prepared_object(obj) -> bool:
@@ -326,6 +374,23 @@ def _prepared_pair(settings):
         abs_tol=1.0e-9,
     ):
         raise RuntimeError("Seam Distance changed; run Prepare again")
+    if bool(static.get(_PREPARED_CROP_ENABLED_TAG, False)) != settings.static_crop_enabled:
+        raise RuntimeError("STATIC crop setting changed; run Prepare again")
+    if settings.static_crop_enabled and (
+        not math.isclose(
+            float(static.get(_PREPARED_CROP_MIN_TAG, math.nan)),
+            settings.static_crop_min_z,
+            rel_tol=1.0e-6,
+            abs_tol=1.0e-9,
+        )
+        or not math.isclose(
+            float(static.get(_PREPARED_CROP_MAX_TAG, math.nan)),
+            settings.static_crop_max_z,
+            rel_tol=1.0e-6,
+            abs_tol=1.0e-9,
+        )
+    ):
+        raise RuntimeError("STATIC crop range changed; run Prepare again")
     return shell, static
 
 
@@ -401,6 +466,25 @@ class OCS_Settings(PropertyGroup):
         type=bpy.types.Object,
         poll=_mesh_object,
     )
+    static_crop_enabled: BoolProperty(
+        name="Crop STATIC Body",
+        description="Keep a topology-stable animated collision band between two world-Z planes",
+        default=True,
+    )
+    static_crop_min_z: FloatProperty(
+        name="Lower Z",
+        description="Lower world-Z cut plane; polygons crossing the plane are retained",
+        default=0.40,
+        subtype="DISTANCE",
+        unit="LENGTH",
+    )
+    static_crop_max_z: FloatProperty(
+        name="Upper Z",
+        description="Upper world-Z cut plane; polygons crossing the plane are retained",
+        default=1.45,
+        subtype="DISTANCE",
+        unit="LENGTH",
+    )
     prepared_shell_object: PointerProperty(
         name="Prepared SHELL",
         type=bpy.types.Object,
@@ -441,7 +525,11 @@ class OCS_Settings(PropertyGroup):
         precision=6,
     )
     collision_iterations: IntProperty(
-        name="Collision Iterations", default=2, min=1, max=64
+        name="Collision Safety Passes",
+        description="Hard post-solve contact projections; zero preserves coupled strain constraints",
+        default=0,
+        min=0,
+        max=64,
     )
     velocity_damping: FloatProperty(
         name="Velocity Damping", default=0.01, min=0.0, max=1.0
@@ -458,6 +546,27 @@ class OCS_Settings(PropertyGroup):
         name="Stretch", default=5000.0, min=0.0, max=1.0e9
     )
     bend_stiffness: FloatProperty(name="Bend", default=5.0, min=0.0, max=1.0e9)
+    strain_limit_enabled: BoolProperty(
+        name="Strain Limit",
+        description="Couple a per-triangle principal-stretch bound into the PD/ADMM system",
+        default=True,
+    )
+    strain_limit_percent: FloatProperty(
+        name="Maximum Stretch",
+        description="Maximum projected tensile principal strain in percent",
+        default=5.0,
+        min=0.1,
+        max=100.0,
+        subtype="PERCENTAGE",
+        precision=2,
+    )
+    strain_limit_stiffness: FloatProperty(
+        name="Limit Solver Weight",
+        description="ADMM penalty weight controlling strain-limit convergence",
+        default=100000.0,
+        min=1.0,
+        max=1.0e9,
+    )
     seam_enabled: BoolProperty(
         name="Auto Seam Threads",
         description="Connect nearby boundary vertices from disconnected SHELL parts",
@@ -480,16 +589,19 @@ class OCS_Settings(PropertyGroup):
         max=1.0e9,
     )
     thickness: FloatProperty(
-        name="Thickness", default=0.01, min=0.0, max=1000.0, subtype="DISTANCE"
+        name="Thickness", default=0.002, min=0.0, max=1000.0, subtype="DISTANCE"
     )
     friction: FloatProperty(name="Friction", default=0.3, min=0.0, max=1.0)
     restitution: FloatProperty(name="Restitution", default=0.0, min=0.0, max=1.0)
     last_prepare_status: StringProperty(name="Prepare Status", default="Not prepared")
     last_prepare_skipped: IntProperty(name="Skipped STATIC Triangles", default=0)
+    last_static_crop_vertices: StringProperty(default="-", options={"HIDDEN"})
+    last_static_crop_polygons: StringProperty(default="-", options={"HIDDEN"})
     last_seam_count: IntProperty(name="Detected Seams", default=0)
     last_status: StringProperty(name="Status", default="Not baked")
     last_contacts: StringProperty(name="Contacts", default="-")
     last_residual: StringProperty(name="PCG Residual", default="-")
+    last_strain: StringProperty(name="Maximum Principal Stretch", default="-")
 
 
 class OCS_OT_set_active_shell(Operator):
@@ -554,6 +666,8 @@ class OCS_OT_prepare(Operator):
             _remove_prepared(settings, restore_visibility=True)
             settings.last_prepare_skipped = 0
             settings.last_seam_count = 0
+            settings.last_static_crop_vertices = "-"
+            settings.last_static_crop_polygons = "-"
 
             collection = bpy.data.collections.new(_PREPARED_COLLECTION_NAME)
             collection[_PREPARED_COLLECTION_TAG] = _PREPARED_VERSION
@@ -592,8 +706,28 @@ class OCS_OT_prepare(Operator):
             prepared_static[_PREPARED_OBJECT_TAG] = _PREPARED_VERSION
             prepared_static[_PREPARED_ROLE_TAG] = "STATIC"
             prepared_static[_PREPARED_SOURCE_TAG] = source_static.name
+            prepared_static[_PREPARED_CROP_ENABLED_TAG] = settings.static_crop_enabled
+            prepared_static[_PREPARED_CROP_MIN_TAG] = settings.static_crop_min_z
+            prepared_static[_PREPARED_CROP_MAX_TAG] = settings.static_crop_max_z
             context.view_layer.update()
             depsgraph = context.evaluated_depsgraph_get()
+            if settings.static_crop_enabled:
+                kept_vertices, source_vertices, kept_polygons, source_polygons = (
+                    _configure_static_crop(
+                        prepared_static,
+                        depsgraph,
+                        settings.static_crop_min_z,
+                        settings.static_crop_max_z,
+                    )
+                )
+                settings.last_static_crop_vertices = (
+                    f"{kept_vertices:,} / {source_vertices:,}"
+                )
+                settings.last_static_crop_polygons = (
+                    f"{kept_polygons:,} / {source_polygons:,}"
+                )
+                context.view_layer.update()
+                depsgraph = context.evaluated_depsgraph_get()
             (_static_vertices, static_triangles, skipped,
              _static_topology) = _filtered_static_mesh(prepared_static, depsgraph)
             if not static_triangles:
@@ -609,11 +743,13 @@ class OCS_OT_prepare(Operator):
             settings.last_prepare_status = (
                 f"Prepared animated STATIC in {collection.name}; "
                 f"{len(seam_pairs)} seams; "
+                f"{len(static_triangles):,} STATIC triangles; "
                 f"skipped {skipped} tiny STATIC triangles"
             )
             settings.last_status = "Ready to bake"
             settings.last_contacts = "-"
             settings.last_residual = "-"
+            settings.last_strain = "-"
 
             if not source_shell.hide_get():
                 source_shell.hide_set(True)
@@ -660,6 +796,7 @@ class OCS_OT_clear_prepared(Operator):
         settings.last_status = "Prepared copies cleared" if removed else "Nothing to clear"
         settings.last_contacts = "-"
         settings.last_residual = "-"
+        settings.last_strain = "-"
         self.report({"INFO"}, settings.last_status)
         return {"FINISHED"}
 
@@ -758,6 +895,12 @@ class OCS_OT_bake(Operator):
             material.thickness = settings.thickness
             material.friction = settings.friction
             material.restitution = settings.restitution
+            material.strain_limit = (
+                settings.strain_limit_percent * 0.01
+                if settings.strain_limit_enabled
+                else 0.0
+            )
+            material.strain_limit_stiffness = settings.strain_limit_stiffness
 
             fps = context.scene.render.fps / context.scene.render.fps_base
             frame_dt = settings.time_scale / fps
@@ -810,6 +953,10 @@ class OCS_OT_bake(Operator):
             if final_stats is not None:
                 settings.last_contacts = str(final_stats.contact_count)
                 settings.last_residual = f"{final_stats.final_pcg_relative_residual:.3g}"
+                settings.last_strain = (
+                    f"{(final_stats.maximum_principal_stretch - 1.0) * 100.0:.2f}% "
+                    f"({final_stats.strain_limit_projection_count} projections)"
+                )
             context.scene.frame_set(settings.frame_start)
             bake_succeeded = True
             self.report({"INFO"}, settings.last_status)
@@ -854,6 +1001,11 @@ class OCS_PT_solver(Panel):
         objects.operator("ocs.set_active_shell", icon="OUTLINER_OB_MESH")
         objects.prop(settings, "static_object")
         objects.operator("ocs.set_active_static", icon="MOD_PHYSICS")
+        objects.prop(settings, "static_crop_enabled")
+        crop = objects.column(align=True)
+        crop.enabled = settings.static_crop_enabled
+        crop.prop(settings, "static_crop_min_z")
+        crop.prop(settings, "static_crop_max_z")
 
         prepare_row = objects.row(align=True)
         prepare_row.scale_y = 1.25
@@ -883,6 +1035,15 @@ class OCS_PT_solver(Panel):
             text=f"Live STATIC modifiers: {static_modifier_count}",
             icon="MODIFIER",
         )
+        if settings.static_crop_enabled:
+            prepared.label(
+                text=f"Crop vertices: {settings.last_static_crop_vertices}",
+                icon="VERTEXSEL",
+            )
+            prepared.label(
+                text=f"Crop polygons: {settings.last_static_crop_polygons}",
+                icon="FACESEL",
+            )
         prepared.label(text=settings.last_prepare_status, icon="INFO")
 
         timing = layout.box()
@@ -897,6 +1058,11 @@ class OCS_PT_solver(Panel):
         material.prop(settings, "density")
         material.prop(settings, "stretch_stiffness")
         material.prop(settings, "bend_stiffness")
+        material.prop(settings, "strain_limit_enabled")
+        strain = material.column()
+        strain.enabled = settings.strain_limit_enabled
+        strain.prop(settings, "strain_limit_percent")
+        strain.prop(settings, "strain_limit_stiffness")
         material.prop(settings, "thickness")
         material.prop(settings, "friction")
         material.prop(settings, "restitution")
@@ -930,6 +1096,7 @@ class OCS_PT_solver(Panel):
         status.label(text=settings.last_status, icon="INFO")
         status.label(text=f"Last contacts: {settings.last_contacts}")
         status.label(text=f"Last PCG residual: {settings.last_residual}")
+        status.label(text=f"Last max strain: {settings.last_strain}")
 
 
 _CLASSES = (

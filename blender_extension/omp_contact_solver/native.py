@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Iterable, Sequence
 
 
-OCS_ABI_VERSION = 3
+OCS_ABI_VERSION = 4
 OCS_OK = 0
 
 
@@ -64,6 +64,8 @@ class ShellMaterial(ctypes.Structure):
         ("thickness", ctypes.c_float),
         ("friction", ctypes.c_float),
         ("restitution", ctypes.c_float),
+        ("strain_limit", ctypes.c_float),
+        ("strain_limit_stiffness", ctypes.c_float),
     ]
 
 
@@ -75,6 +77,8 @@ class StepStats(ctypes.Structure):
         ("pcg_iterations", ctypes.c_uint64),
         ("contact_count", ctypes.c_uint64),
         ("final_pcg_relative_residual", ctypes.c_float),
+        ("strain_limit_projection_count", ctypes.c_uint64),
+        ("maximum_principal_stretch", ctypes.c_float),
     ]
 
 

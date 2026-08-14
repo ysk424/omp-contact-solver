@@ -14,6 +14,7 @@ Supported:
 - one topology-stable, animated triangle `STATIC` mesh (it may contain disconnected objects);
 - gravity, inertia, damping, stretch and simple bending;
 - high-strength seam threads between disconnected SHELL parts;
+- optional per-triangle principal Strain Limit coupled through PD/ADMM;
 - two-sided `SHELL` vertex versus `STATIC` triangle contact;
 - thickness, friction and restitution;
 - OpenMP parallel prediction, constraint projection, PCG and BVH queries;
@@ -33,11 +34,18 @@ compact bending constraint. The global system is solved by a symmetric Gauss-
 Seidel-preconditioned, OpenMP-parallel matrix-free PCG. STATIC triangles are
 stored in a median-split BVH whose bounds are refitted with OpenMP for animated
 vertices. Swept vertex-triangle and closest-point
-queries supply finite contact targets to the same global solve; a final safety
-projection maintains the requested cloth thickness. Seam threads use their
+queries supply finite contact targets to the same global solve. Optional hard
+contact safety passes are available, while the Blender Extension defaults them
+to zero so they cannot invalidate the coupled Strain Limit. Seam threads use their
 captured rest length, finite stiffness, and the same Projective Dynamics
 local/global solve as stretch and contact. There is no post-solve seam
 projection.
+
+The Strain Limit projects each triangle deformation gradient onto a maximum
+singular-value bound (5% means `sigma_max <= 1.05`). Scaled ADMM dual updates
+feed the projection back into the same matrix-free global system. It is not a
+post-solve vertex clamp. `strain_limit_stiffness` is the ADMM penalty controlling
+convergence rather than a physical Young's modulus.
 
 ## Build
 
@@ -71,8 +79,9 @@ cmake --build build --target visual-test-report
 start build/visual-tests/index.html
 ```
 
-The report contains a playable cloth animation and charts for height, contact
-projections and PCG residual. `build/visual-tests/final_state.obj` contains the
+The report contains a playable cloth animation, a strain-limit stress check,
+and charts for height, contact projections and PCG residual.
+`build/visual-tests/final_state.obj` contains the
 same final STATIC and SHELL meshes for inspection in Blender. CTest also runs
 the report generator and treats generation or simulation failure as a failed
 test. `animation.json` contains all sampled vertex frames for DCC import.
@@ -101,14 +110,17 @@ cmake --build build --target blender-extension
 cmake --build build --target blender-extension-test
 ```
 
-Install `build/packages/omp_contact_solver-0.4.0-windows-x64.zip` from
+Install `build/packages/omp_contact_solver-0.5.0-windows-x64.zip` from
 **Edit > Preferences > Extensions > Install from Disk**. The controls are in
 **3D View > Sidebar > OMP Cloth**. Assign source meshes, then use **Prepare
 Simulation Copies**. The Extension evaluates the source `SHELL` at the first
 bake frame and copies the source `STATIC` object with its Armature, Mesh Cache,
 and other animation modifiers into a separate `OMP Contact Simulation`
 collection. At every frame it evaluates that visible collision copy and sends
-its vertices to the DLL. Tiny triangles below the native solver's area
+its vertices to the DLL. By default a topology-stable final Mask keeps body
+polygons crossing world Z=0.40 through Z=1.45; it leaves the source Mesh Cache
+and Armature inputs intact and requires no caps because contact is two-sided.
+Tiny triangles below the native solver's area
 tolerance are omitted from collision without changing the visible mesh. It
 also pairs nearby boundary vertices from
 disconnected SHELL parts as finite high-strength seam threads without merging

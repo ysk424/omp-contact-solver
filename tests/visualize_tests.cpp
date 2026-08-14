@@ -28,6 +28,13 @@ struct FrameMetric {
     uint64_t contacts = 0;
     uint64_t pcg_iterations = 0;
     float residual = 0.0f;
+    float maximum_stretch = 1.0f;
+    uint64_t strain_projections = 0;
+};
+
+struct StrainCheck {
+    float unlimited = 1.0f;
+    float limited = 1.0f;
 };
 
 struct VisualRun {
@@ -61,6 +68,8 @@ FrameMetric metric_for(uint32_t frame, const std::vector<OcsVec3> &positions,
         metric.contacts = stats->contact_count;
         metric.pcg_iterations = stats->pcg_iterations;
         metric.residual = stats->final_pcg_relative_residual;
+        metric.maximum_stretch = stats->maximum_principal_stretch;
+        metric.strain_projections = stats->strain_limit_projection_count;
     }
     return metric;
 }
@@ -175,6 +184,56 @@ float run_swept_contact_check() {
     return min_y;
 }
 
+float run_strain_case(float limit, float stiffness) {
+    OcsSolverDesc desc;
+    ocsDefaultSolverDesc(&desc);
+    desc.gravity = {0, 0, 0};
+    desc.substeps = 4;
+    desc.pd_iterations = 8;
+    desc.pcg_iterations = 300;
+    Handle solver{ocsCreate(&desc)};
+    if (!solver.value) throw std::runtime_error(ocsGetLastError(nullptr));
+    const OcsVec3 static_vertices[] = {
+        {0, -2, -2}, {0, 2, -2}, {0, 2, 2}, {0, -2, 2}};
+    const OcsTriangle static_triangles[] = {{0, 1, 2}, {0, 2, 3}};
+    const OcsVec3 shell_vertices[] = {
+        {-0.001f, -0.5f, 0}, {0.5f, -0.5f, 0}, {0.5f, 0.5f, 0}};
+    const OcsTriangle shell_triangle[] = {{0, 1, 2}};
+    OcsShellMaterial material;
+    ocsDefaultShellMaterial(&material);
+    material.stretch_stiffness = 1.0f;
+    material.bend_stiffness = 0.0f;
+    material.thickness = 0.2f;
+    material.strain_limit = limit;
+    material.strain_limit_stiffness = stiffness;
+    checked(ocsSetStaticMesh(solver.value, static_vertices, 4,
+                             static_triangles, 2), solver.value,
+            "strain visual STATIC");
+    checked(ocsSetShellMesh(solver.value, shell_vertices, 3,
+                            shell_triangle, 1, &material), solver.value,
+            "strain visual SHELL");
+    checked(ocsBuild(solver.value), solver.value, "strain visual build");
+    OcsStepStats stats{};
+    stats.struct_size = sizeof(stats);
+    for (int frame = 0; frame < 10; ++frame) {
+        checked(ocsStep(solver.value, 1.0f / 24.0f), solver.value,
+                "strain visual step");
+        checked(ocsGetLastStepStats(solver.value, &stats), solver.value,
+                "strain visual stats");
+    }
+    return stats.maximum_principal_stretch;
+}
+
+StrainCheck run_strain_limit_check() {
+    StrainCheck result;
+    result.unlimited = run_strain_case(0.0f, 0.0f);
+    result.limited = run_strain_case(0.05f, 10000.0f);
+    if (!(result.unlimited > 2.0f && result.limited <= 1.06f)) {
+        throw std::runtime_error("strain-limit visualization check failed");
+    }
+    return result;
+}
+
 void write_vec3_array(std::ostream &out, const std::vector<OcsVec3> &values) {
     out << '[';
     for (size_t i = 0; i < values.size(); ++i) {
@@ -211,7 +270,8 @@ void write_obj(const fs::path &path, const VisualRun &run) {
     }
 }
 
-void write_summary(const fs::path &path, const VisualRun &run, float swept_min_y) {
+void write_summary(const fs::path &path, const VisualRun &run, float swept_min_y,
+                   const StrainCheck &strain) {
     const FrameMetric &last = run.metrics.back();
     std::ofstream out(path);
     if (!out) throw std::runtime_error("could not write summary.json");
@@ -224,7 +284,9 @@ void write_summary(const fs::path &path, const VisualRun &run, float swept_min_y
         << ",\n  \"final_max_y\": " << last.max_y
         << ",\n  \"final_contacts\": " << last.contacts
         << ",\n  \"final_pcg_residual\": " << last.residual
-        << ",\n  \"swept_test_min_y\": " << swept_min_y << "\n}\n";
+        << ",\n  \"swept_test_min_y\": " << swept_min_y
+        << ",\n  \"strain_unlimited_max\": " << strain.unlimited
+        << ",\n  \"strain_limited_max\": " << strain.limited << "\n}\n";
 }
 
 void write_animation(const fs::path &path, const VisualRun &run) {
@@ -250,7 +312,8 @@ void write_animation(const fs::path &path, const VisualRun &run) {
     out << "]\n}\n";
 }
 
-void write_html(const fs::path &path, const VisualRun &run, float swept_min_y) {
+void write_html(const fs::path &path, const VisualRun &run, float swept_min_y,
+                const StrainCheck &strain) {
     std::ofstream out(path);
     if (!out) throw std::runtime_error("could not write index.html");
     out << std::fixed << std::setprecision(6);
@@ -272,8 +335,8 @@ footer{color:var(--muted);margin-top:14px;font-size:12px}@media(max-width:850px)
 <div class="grid"><section class="panel"><canvas id="scene" width="900" height="560"></canvas><div class="controls"><button id="play">Pause</button><input id="scrub" type="range" min="0" value="0"><span id="frame">Frame 0</span></div></section>
 <aside class="panel"><div class="cards"><div class="card"><div class="label">SHELL vertices</div><div class="value">)HTML"
         << run.frames.back().size() << R"HTML(</div></div><div class="card"><div class="label">SHELL triangles</div><div class="value">)HTML"
-        << run.shell_triangles.size() << R"HTML(</div></div><div class="card"><div class="label">Final min Y</div><div class="value" id="minY">–</div></div><div class="card"><div class="label">Final max Y</div><div class="value" id="maxY">–</div></div></div>
-<div class="tests"><div class="test"><span>Projective Dynamics</span><span class="pass">PASS</span></div><div class="test"><span>STATIC BVH contact</span><span class="pass">PASS</span></div><div class="test"><span>Animated STATIC refit</span><span class="pass">PASS</span></div><div class="test"><span>Swept tunnelling test</span><span class="pass">PASS</span></div><div class="test"><span>OpenMP runtime</span><span class="pass">ENABLED</span></div></div>
+        << run.shell_triangles.size() << R"HTML(</div></div><div class="card"><div class="label">Final min Y</div><div class="value" id="minY">–</div></div><div class="card"><div class="label">Final max Y</div><div class="value" id="maxY">–</div></div><div class="card"><div class="label">Unlimited stretch</div><div class="value" id="strainUnlimitedValue">–</div></div><div class="card"><div class="label">Limited stretch</div><div class="value" id="strainLimitedValue">–</div></div></div>
+<div class="tests"><div class="test"><span>Projective Dynamics</span><span class="pass">PASS</span></div><div class="test"><span>Triangle Strain Limit</span><span class="pass">PASS</span></div><div class="test"><span>STATIC BVH contact</span><span class="pass">PASS</span></div><div class="test"><span>Animated STATIC refit</span><span class="pass">PASS</span></div><div class="test"><span>Swept tunnelling test</span><span class="pass">PASS</span></div><div class="test"><span>OpenMP runtime</span><span class="pass">ENABLED</span></div></div>
 <div class="chart"><canvas id="chart" width="420" height="210"></canvas><div class="legend"><span><i class="dot" style="background:#22d3ee"></i>max Y</span><span><i class="dot" style="background:#fbbf24"></i>min Y</span><span><i class="dot" style="background:#34d399"></i>contacts</span></div></div></aside></div>
 <footer>Artifacts: final_state.obj · animation.json · summary.json · Generated by omp_contact_solver_visual_test</footer>
 <script>
@@ -289,7 +352,9 @@ footer{color:var(--muted);margin-top:14px;font-size:12px}@media(max-width:850px)
             << ",c:" << m.contacts << ",pcg:" << m.pcg_iterations
             << ",r:" << m.residual << '}';
     }
-    out << "];\nconst sweptMinY=" << swept_min_y << ";\n";
+    out << "];\nconst sweptMinY=" << swept_min_y
+        << ";\nconst strainUnlimited=" << strain.unlimited
+        << ";\nconst strainLimited=" << strain.limited << ";\n";
     out << R"HTML(
 const canvas=document.getElementById('scene'),ctx=canvas.getContext('2d');const scrub=document.getElementById('scrub'),label=document.getElementById('frame'),play=document.getElementById('play');scrub.max=frames.length-1;
 function project(v){const yaw=-.68,pitch=.48,cy=Math.cos(yaw),sy=Math.sin(yaw),cp=Math.cos(pitch),sp=Math.sin(pitch);const xr=cy*v[0]-sy*v[2],zr=sy*v[0]+cy*v[2],yr=cp*(v[1]-.25)-sp*zr,depth=sp*(v[1]-.25)+cp*zr;return [450+xr*165,325-yr*165,depth]}
@@ -299,6 +364,7 @@ function draw(i){ctx.clearRect(0,0,canvas.width,canvas.height);const g=ctx.creat
 const chart=document.getElementById('chart'),cc=chart.getContext('2d');function line(values,color,max){cc.beginPath();values.forEach((v,i)=>{const x=32+i*(370/(values.length-1)),y=184-v/max*148;i?cc.lineTo(x,y):cc.moveTo(x,y)});cc.strokeStyle=color;cc.lineWidth=2;cc.stroke()}
 function drawChart(){cc.clearRect(0,0,420,210);cc.strokeStyle='#29404f';cc.fillStyle='#7892a5';cc.font='11px system-ui';for(let i=0;i<4;i++){const y=36+i*49;cc.beginPath();cc.moveTo(32,y);cc.lineTo(402,y);cc.stroke()}const ymax=Math.max(...metrics.map(m=>m.max),1),cmax=Math.max(...metrics.map(m=>m.c),1);line(metrics.map(m=>m.max),'#22d3ee',ymax);line(metrics.map(m=>m.min),'#fbbf24',ymax);line(metrics.map(m=>m.c),'#34d399',cmax);cc.fillText('0',10,188);cc.fillText(metrics.at(-1).f+'f',378,204)}
 let index=0,playing=true;play.onclick=()=>{playing=!playing;play.textContent=playing?'Pause':'Play'};scrub.oninput=()=>{index=+scrub.value;playing=false;play.textContent='Play';draw(index)};setInterval(()=>{if(playing){index=(index+1)%frames.length;draw(index)}},90);drawChart();draw(0);
+document.getElementById('strainUnlimitedValue').textContent=((strainUnlimited-1)*100).toFixed(1)+'%';document.getElementById('strainLimitedValue').textContent=((strainLimited-1)*100).toFixed(1)+'%';
 </script></main></body></html>)HTML";
 }
 
@@ -310,10 +376,11 @@ int main(int argc, char **argv) {
         fs::create_directories(output);
         const VisualRun run = simulate_pyramid_scene();
         const float swept_min_y = run_swept_contact_check();
+        const StrainCheck strain = run_strain_limit_check();
         write_obj(output / "final_state.obj", run);
-        write_summary(output / "summary.json", run, swept_min_y);
+        write_summary(output / "summary.json", run, swept_min_y, strain);
         write_animation(output / "animation.json", run);
-        write_html(output / "index.html", run, swept_min_y);
+        write_html(output / "index.html", run, swept_min_y, strain);
         std::cout << "Visual report: " << fs::absolute(output / "index.html") << '\n';
         std::cout << "Final OBJ:    " << fs::absolute(output / "final_state.obj") << '\n';
         return 0;

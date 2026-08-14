@@ -10,6 +10,13 @@ int main(void) {
         fputs("C ABI metadata check failed\n", stderr);
         return 1;
     }
+    OcsShellMaterial material;
+    ocsDefaultShellMaterial(&material);
+    if (material.struct_size != sizeof(material) || material.strain_limit != 0.0f ||
+        material.strain_limit_stiffness <= 0.0f) {
+        fputs("C ABI strain-limit defaults check failed\n", stderr);
+        return 1;
+    }
     OcsSolver *solver = ocsCreate(&desc);
     if (!solver) {
         fprintf(stderr, "C ABI create failed: %s\n", ocsGetLastError(NULL));
