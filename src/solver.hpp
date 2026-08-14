@@ -35,6 +35,7 @@ struct Aabb {
 
 struct StaticTriangle {
     uint32_t i[3]{};
+    bool active = true;
     Vec3 normal;
     Vec3 centroid;
     Aabb bounds;
@@ -52,6 +53,8 @@ class StaticBvh {
 public:
     bool build(const std::vector<Vec3> &vertices,
                const std::vector<OcsTriangle> &triangles,
+               std::string &error);
+    bool refit(const std::vector<Vec3> &vertices, int threads,
                std::string &error);
     bool empty() const { return triangles_.empty(); }
 
@@ -108,6 +111,8 @@ public:
 
     bool set_static_mesh(const OcsVec3 *vertices, uint32_t vertex_count,
                          const OcsTriangle *triangles, uint32_t triangle_count);
+    bool update_static_vertices(const OcsVec3 *vertices,
+                                uint32_t vertex_count);
     bool set_shell_mesh(const OcsVec3 *vertices, uint32_t vertex_count,
                         const OcsTriangle *triangles, uint32_t triangle_count,
                         const OcsShellMaterial &material);
@@ -116,6 +121,9 @@ public:
     bool step(float frame_dt);
 
     uint32_t vertex_count() const { return static_cast<uint32_t>(positions_.size()); }
+    uint32_t static_vertex_count() const {
+        return static_cast<uint32_t>(static_vertices_.size());
+    }
     const std::vector<Vec3> &positions() const { return positions_; }
     const std::vector<Vec3> &velocities() const { return velocities_; }
     const std::string &error() const { return error_; }
@@ -146,6 +154,8 @@ private:
     bool built_ = false;
 
     std::vector<Vec3> static_vertices_;
+    std::vector<Vec3> static_target_vertices_;
+    std::vector<Vec3> static_substep_vertices_;
     std::vector<OcsTriangle> static_triangles_;
     std::vector<OcsTriangle> shell_triangles_;
     std::vector<OcsSeam> shell_seams_;
@@ -173,6 +183,7 @@ private:
     std::vector<uint8_t> contacted_;
     std::vector<uint8_t> active_contacts_;
     float contact_weight_ = 0.0f;
+    bool static_update_pending_ = false;
 
     StepStats stats_{};
     std::string error_;

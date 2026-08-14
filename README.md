@@ -11,7 +11,7 @@ responsibility of the caller.
 Supported:
 
 - one deformable triangle `SHELL` mesh;
-- one immutable triangle `STATIC` mesh (it may contain disconnected objects);
+- one topology-stable, animated triangle `STATIC` mesh (it may contain disconnected objects);
 - gravity, inertia, damping, stretch and simple bending;
 - high-strength seam threads between disconnected SHELL parts;
 - two-sided `SHELL` vertex versus `STATIC` triangle contact;
@@ -23,7 +23,7 @@ Intentionally unsupported:
 
 - PIN constraints;
 - SHELL self-collision or SHELL-SHELL collision;
-- moving STATIC geometry;
+- topology-changing STATIC modifiers;
 - edge-edge collision and exact cloth CCD;
 - tets, rods, sand, rigid bodies, plasticity and rendering.
 
@@ -31,7 +31,8 @@ The elastic step is Projective Dynamics. Unique triangle edges provide stretch
 constraints; the two opposite vertices of each interior edge provide the
 compact bending constraint. The global system is solved by a symmetric Gauss-
 Seidel-preconditioned, OpenMP-parallel matrix-free PCG. STATIC triangles are
-stored in an immutable median-split BVH. Swept vertex-triangle and closest-point
+stored in a median-split BVH whose bounds are refitted with OpenMP for animated
+vertices. Swept vertex-triangle and closest-point
 queries supply finite contact targets to the same global solve; a final safety
 projection maintains the requested cloth thickness. Seam threads use their
 captured rest length, finite stiffness, and the same Projective Dynamics
@@ -86,7 +87,7 @@ An MSVC build uses the OpenMP/runtime components supplied with that toolchain.
 ## Blender Extension
 
 The Windows x64 Blender Extension wraps the C ABI with `ctypes`. It assigns one
-Blender mesh as `SHELL`, evaluates one mesh as immutable `STATIC`, runs the CPU
+Blender mesh as `SHELL`, evaluates one animated mesh as `STATIC`, runs the CPU
 solver, and bakes the result as absolute Shape Keys. Rendering remains entirely
 in Blender; the DLL still has no rendering or GPU dependency.
 
@@ -100,13 +101,16 @@ cmake --build build --target blender-extension
 cmake --build build --target blender-extension-test
 ```
 
-Install `build/packages/omp_contact_solver-0.3.1-windows-x64.zip` from
+Install `build/packages/omp_contact_solver-0.4.0-windows-x64.zip` from
 **Edit > Preferences > Extensions > Install from Disk**. The controls are in
 **3D View > Sidebar > OMP Cloth**. Assign source meshes, then use **Prepare
-Simulation Copies**. The Extension evaluates both sources at the first bake
-frame into a separate `OMP Contact Simulation` collection. It applies the
-source modifiers, triangulates the prepared `STATIC`, and omits triangles below
-the native solver's area tolerance. It also pairs nearby boundary vertices from
+Simulation Copies**. The Extension evaluates the source `SHELL` at the first
+bake frame and copies the source `STATIC` object with its Armature, Mesh Cache,
+and other animation modifiers into a separate `OMP Contact Simulation`
+collection. At every frame it evaluates that visible collision copy and sends
+its vertices to the DLL. Tiny triangles below the native solver's area
+tolerance are omitted from collision without changing the visible mesh. It
+also pairs nearby boundary vertices from
 disconnected SHELL parts as finite high-strength seam threads without merging
 the mesh. Baking and clearing then operate only on the prepared `SHELL`; source
 meshes and their existing Shape Keys are not overwritten.
@@ -134,13 +138,18 @@ ocsSetShellMesh(solver, shell_vertices, shell_vertex_count,
 ocsSetShellSeams(solver, seams, seam_count); /* Optional. */
 
 ocsBuild(solver);
+ocsUpdateStaticVertices(solver, animated_static_vertices,
+                        static_vertex_count); /* Optional per frame. */
 ocsStep(solver, 1.0f / 60.0f);
 ocsCopyShellPositions(solver, output, shell_vertex_count);
 ocsDestroy(solver);
 ```
 
 `ocsBuild()` freezes both topologies, creates the cloth constraints and builds
-the STATIC BVH. Create separate solver handles for independent simulations.
+the STATIC BVH. `ocsUpdateStaticVertices()` queues a deformation target for the
+next step; the DLL interpolates it over the configured substeps and refits the
+BVH without rebuilding its topology. Create separate solver handles for
+independent simulations.
 Calls on one handle must not overlap; different handles may be advanced by
 different host threads. `thread_count = 0` uses `omp_get_max_threads()`.
 
@@ -148,7 +157,9 @@ different host threads. `thread_count = 0` uses `omp_get_max_threads()`.
 
 Contact is vertex-triangle only. The swept test greatly reduces vertex
 tunnelling, but an edge can still pass through a thin triangle without a vertex
-crossing it. Use more substeps for fast or very thin motion. Because no PIN is
+crossing it. Animated STATIC motion is sampled at each solver substep; use more
+substeps for fast or very thin motion. STATIC modifiers must preserve vertex
+count and topology. Because no PIN is
 supported, all SHELL vertices are dynamic.
 
 The compact bending constraint is not parameter-compatible with the CUDA PPF

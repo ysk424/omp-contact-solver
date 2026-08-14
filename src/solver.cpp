@@ -227,6 +227,57 @@ bool StaticBvh::build(const std::vector<Vec3> &vertices,
     return true;
 }
 
+bool StaticBvh::refit(const std::vector<Vec3> &vertices, int threads,
+                      std::string &error) {
+    if (vertices.size() != vertices_.size()) {
+        error = "animated STATIC vertex count changed";
+        return false;
+    }
+    vertices_ = vertices;
+    const int64_t triangle_count =
+        static_cast<int64_t>(triangles_.size());
+#pragma omp parallel for schedule(static) num_threads(threads) if(triangle_count > kParallelThreshold)
+    for (int64_t ti = 0; ti < triangle_count; ++ti) {
+        StaticTriangle &triangle = triangles_[ti];
+        const Vec3 a = vertices_[triangle.i[0]];
+        const Vec3 b = vertices_[triangle.i[1]];
+        const Vec3 c = vertices_[triangle.i[2]];
+        const Vec3 n_raw = cross(b - a, c - a);
+        const float n_len = length(n_raw);
+        if (!(n_len > kEpsilon) || !finite(n_raw)) {
+            // Deformation caches can collapse tiny triangles for only a few
+            // samples. Exclude them from this refit instead of invalidating
+            // the complete collider; they become active again automatically.
+            triangle.active = false;
+            triangle.bounds = empty_aabb();
+            continue;
+        }
+        triangle.active = true;
+        triangle.normal = n_raw / n_len;
+        triangle.centroid = (a + b + c) / 3.0f;
+        triangle.bounds = empty_aabb();
+        grow(triangle.bounds, a);
+        grow(triangle.bounds, b);
+        grow(triangle.bounds, c);
+    }
+    // build_node() stores parents before children, so a reverse traversal
+    // updates every child bound before its parent without rebuilding topology.
+    for (size_t reverse = nodes_.size(); reverse-- > 0u;) {
+        BvhNode &node = nodes_[reverse];
+        Aabb bounds = empty_aabb();
+        if (node.count != 0u) {
+            for (uint32_t i = node.first; i < node.first + node.count; ++i) {
+                grow(bounds, triangles_[order_[i]].bounds);
+            }
+        } else {
+            grow(bounds, nodes_[node.left].bounds);
+            grow(bounds, nodes_[node.right].bounds);
+        }
+        node.bounds = bounds;
+    }
+    return true;
+}
+
 uint32_t StaticBvh::build_node(uint32_t first, uint32_t count) {
     const uint32_t node_index = static_cast<uint32_t>(nodes_.size());
     nodes_.push_back({});
@@ -275,6 +326,7 @@ StaticBvh::ClosestHit StaticBvh::closest_within(Vec3 point, float radius) const 
         if (node.count != 0u) {
             for (uint32_t i = node.first; i < node.first + node.count; ++i) {
                 const StaticTriangle &t = triangles_[order_[i]];
+                if (!t.active) continue;
                 const Vec3 q = closest_point_triangle(
                     point, vertices_[t.i[0]], vertices_[t.i[1]], vertices_[t.i[2]]);
                 const float d2 = length_squared(point - q);
@@ -307,6 +359,7 @@ StaticBvh::SegmentHit StaticBvh::first_segment_hit(Vec3 from, Vec3 to,
         if (node.count != 0u) {
             for (uint32_t i = node.first; i < node.first + node.count; ++i) {
                 const StaticTriangle &t = triangles_[order_[i]];
+                if (!t.active) continue;
                 float hit_time = result.time;
                 if (segment_triangle(from, to, vertices_[t.i[0]], vertices_[t.i[1]],
                                      vertices_[t.i[2]], hit_time)) {
@@ -356,6 +409,29 @@ bool Solver::set_static_mesh(const OcsVec3 *vertices, uint32_t vertex_count,
         }
     }
     static_triangles_.assign(triangles, triangles + triangle_count);
+    return true;
+}
+
+bool Solver::update_static_vertices(const OcsVec3 *vertices,
+                                    uint32_t vertex_count) {
+    error_.clear();
+    if (!built_) {
+        error_ = "ocsBuild must succeed before updating STATIC vertices";
+        return false;
+    }
+    if (!vertices || vertex_count != static_vertices_.size()) {
+        error_ = "animated STATIC vertex array is null or has the wrong size";
+        return false;
+    }
+    static_target_vertices_.resize(vertex_count);
+    for (uint32_t i = 0; i < vertex_count; ++i) {
+        static_target_vertices_[i] = from_public(vertices[i]);
+        if (!finite(static_target_vertices_[i])) {
+            error_ = "animated STATIC contains a non-finite vertex";
+            return false;
+        }
+    }
+    static_update_pending_ = true;
     return true;
 }
 
@@ -447,6 +523,9 @@ bool Solver::build() {
     contacted_.resize(n);
     active_contacts_.resize(n);
     contact_weight_ = material_.stretch_stiffness * kContactWeightScale;
+    static_target_vertices_ = static_vertices_;
+    static_substep_vertices_.resize(static_vertices_.size());
+    static_update_pending_ = false;
     built_ = true;
     return true;
 }
@@ -771,6 +850,21 @@ bool Solver::step(float frame_dt) {
     const int64_t n = static_cast<int64_t>(positions_.size());
     const int64_t nc = static_cast<int64_t>(constraints_.size());
     for (uint32_t substep = 0; substep < desc_.substeps; ++substep) {
+        if (static_update_pending_) {
+            const float alpha = static_cast<float>(substep + 1u) /
+                                static_cast<float>(desc_.substeps);
+            const int64_t static_count =
+                static_cast<int64_t>(static_vertices_.size());
+#pragma omp parallel for schedule(static) num_threads(threads_) if(static_count > kParallelThreshold)
+            for (int64_t i = 0; i < static_count; ++i) {
+                static_substep_vertices_[i] =
+                    static_vertices_[i] * (1.0f - alpha) +
+                    static_target_vertices_[i] * alpha;
+            }
+            if (!static_bvh_.refit(static_substep_vertices_, threads_, error_)) {
+                return false;
+            }
+        }
         substep_start_ = positions_;
         std::fill(contact_normals_.begin(), contact_normals_.end(), Vec3{});
         std::fill(contacted_.begin(), contacted_.end(), 0u);
@@ -845,6 +939,10 @@ bool Solver::step(float frame_dt) {
     if (!finite_state()) {
         error_ = "solver produced a non-finite SHELL state";
         return false;
+    }
+    if (static_update_pending_) {
+        static_vertices_ = static_target_vertices_;
+        static_update_pending_ = false;
     }
     return true;
 }

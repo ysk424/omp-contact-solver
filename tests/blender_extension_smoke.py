@@ -61,6 +61,14 @@ def main():
             [(0, 1, 2), (0, 2, 3), (4, 5, 6), (4, 6, 7)],
         )
         static.location.z = 0.1
+        static.keyframe_insert(data_path="location", index=2, frame=1)
+        static.location.z = 0.2
+        static.keyframe_insert(data_path="location", index=2, frame=24)
+        static.location.z = 0.1
+        static_smooth = static.modifiers.new(
+            name="Animated Body Deformation", type="SMOOTH"
+        )
+        static_smooth.factor = 0.0
         shell.location = (0.2, -0.1, 0.3)
         shell.shape_key_add(name="User Basis")
         smooth = shell.modifiers.new(name="Evaluated Initial Shape", type="SMOOTH")
@@ -105,6 +113,9 @@ def main():
         assert prepared_collection is not None
         assert prepared_shell.name in prepared_collection.objects
         assert prepared_static.name in prepared_collection.objects
+        assert prepared_static.hide_viewport is False
+        assert prepared_static.hide_get() is False
+        assert "Animated Body Deformation" in prepared_static.modifiers
         prepared_collection_name = prepared_collection.name
         assert tuple(prepared_shell.matrix_world) == tuple(
             type(prepared_shell.matrix_world).Identity(4)
@@ -119,7 +130,7 @@ def main():
         for actual, expected in zip(actual_shell_positions, expected_shell_positions):
             assert max(abs(a - b) for a, b in zip(actual, expected)) < 1.0e-6
         prepared_static.data.calc_loop_triangles()
-        assert len(prepared_static.data.loop_triangles) == 2
+        assert len(prepared_static.data.loop_triangles) == 3
         assert settings.last_prepare_skipped == 1
         assert settings.last_seam_count == 2
         seam_pairs = [(1, 4), (2, 7)]
@@ -150,8 +161,12 @@ def main():
             (prepared_shell.matrix_world @ point.co).z
             for point in keys.key_blocks[-1].data
         )
-        assert 0.119 <= final_height <= 0.2, final_height
+        assert 0.219 <= final_height <= 0.35, final_height
         assert settings.last_status.startswith("Baked 24 frames")
+        bpy.context.scene.frame_set(24)
+        animated_static_z = prepared_static.matrix_world.translation.z
+        assert abs(animated_static_z - 0.2) < 1.0e-6, animated_static_z
+        bpy.context.scene.frame_set(1)
 
         assert bpy.ops.ocs.clear_bake() == {"FINISHED"}
         assert prepared_shell.data.shape_keys is None
@@ -166,6 +181,7 @@ def main():
         print(
             "Blender Extension preparation smoke test passed: "
             f"OpenMP={get_library().openmp_enabled}, skipped_static=1, "
+            f"animated_static_delta={animated_static_z - 0.1:.3f}, "
             f"seam_max_error={maximum_seam_relative_error:.6f}, "
             f"final_min_z={final_height:.6f}"
         )

@@ -131,6 +131,35 @@ OcsResult ocsSetStaticMesh(OcsSolver *solver, const OcsVec3 *vertices,
     }
 }
 
+OcsResult ocsUpdateStaticVertices(OcsSolver *solver,
+                                  const OcsVec3 *vertices,
+                                  uint32_t vertex_count) {
+    if (!solver) {
+        return fail(nullptr, OCS_ERROR_INVALID_ARGUMENT, "solver is null");
+    }
+    if (!solver->impl.built()) {
+        return fail(solver, OCS_ERROR_INVALID_STATE,
+                    "ocsBuild must succeed before updating STATIC vertices");
+    }
+    if (!vertices || vertex_count != solver->impl.static_vertex_count()) {
+        return fail(solver, OCS_ERROR_INVALID_ARGUMENT,
+                    "animated STATIC vertex array is null or has the wrong size");
+    }
+    try {
+        return solver->impl.update_static_vertices(vertices, vertex_count)
+                   ? OCS_OK
+                   : OCS_ERROR_INVALID_MESH;
+    } catch (const std::bad_alloc &) {
+        return fail(solver, OCS_ERROR_OUT_OF_MEMORY,
+                    "out of memory while updating STATIC vertices");
+    } catch (const std::exception &e) {
+        return fail(solver, OCS_ERROR_INTERNAL, e.what());
+    } catch (...) {
+        return fail(solver, OCS_ERROR_INTERNAL,
+                    "unknown error while updating STATIC vertices");
+    }
+}
+
 OcsResult ocsSetShellMesh(OcsSolver *solver, const OcsVec3 *vertices,
                           uint32_t vertex_count,
                           const OcsTriangle *triangles,

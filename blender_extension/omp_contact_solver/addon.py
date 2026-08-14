@@ -3,7 +3,6 @@
 import math
 import time
 
-import bmesh
 import bpy
 from bpy.props import (
     BoolProperty,
@@ -27,6 +26,7 @@ _PREPARED_SEAMS_TAG = "omp_contact_solver_seam_pairs"
 _PREPARED_SEAM_DISTANCE_TAG = "omp_contact_solver_seam_distance"
 _PREPARED_SEAM_ENABLED_TAG = "omp_contact_solver_seam_enabled"
 _PREPARED_COLLECTION_NAME = "OMP Contact Simulation"
+_PREPARED_VERSION = 2
 _STATIC_TWICE_AREA_FILTER = 1.25e-7
 _BAKE_RUNNING = False
 
@@ -46,13 +46,58 @@ def _shell_mesh(obj):
     return _triangulated_mesh(obj.data, obj.matrix_world)
 
 
-def _static_mesh(obj, depsgraph):
+def _static_topology_signature(mesh):
+    return (
+        len(mesh.vertices),
+        len(mesh.edges),
+        len(mesh.polygons),
+        len(mesh.loops),
+    )
+
+
+def _filtered_static_mesh(obj, depsgraph):
     evaluated = obj.evaluated_get(depsgraph)
     mesh = evaluated.to_mesh(preserve_all_data_layers=False, depsgraph=depsgraph)
     if mesh is None:
         raise RuntimeError("STATIC object could not be evaluated as a mesh")
     try:
-        return _triangulated_mesh(mesh, evaluated.matrix_world)
+        vertices, triangles = _triangulated_mesh(mesh, evaluated.matrix_world)
+        accepted = []
+        skipped = 0
+        for i0, i1, i2 in triangles:
+            a = vertices[i0]
+            b = vertices[i1]
+            c = vertices[i2]
+            ab = (b[0] - a[0], b[1] - a[1], b[2] - a[2])
+            ac = (c[0] - a[0], c[1] - a[1], c[2] - a[2])
+            cross = (
+                ab[1] * ac[2] - ab[2] * ac[1],
+                ab[2] * ac[0] - ab[0] * ac[2],
+                ab[0] * ac[1] - ab[1] * ac[0],
+            )
+            twice_area = math.sqrt(sum(value * value for value in cross))
+            if (
+                math.isfinite(twice_area)
+                and twice_area > _STATIC_TWICE_AREA_FILTER
+            ):
+                accepted.append((i0, i1, i2))
+            else:
+                skipped += 1
+        return vertices, accepted, skipped, _static_topology_signature(mesh)
+    finally:
+        evaluated.to_mesh_clear()
+
+
+def _evaluated_static_vertices(obj, depsgraph):
+    evaluated = obj.evaluated_get(depsgraph)
+    mesh = evaluated.to_mesh(preserve_all_data_layers=False, depsgraph=depsgraph)
+    if mesh is None:
+        raise RuntimeError("Animated STATIC could not be evaluated as a mesh")
+    try:
+        vertices = [
+            tuple(evaluated.matrix_world @ vertex.co) for vertex in mesh.vertices
+        ]
+        return vertices, _static_topology_signature(mesh)
     finally:
         evaluated.to_mesh_clear()
 
@@ -79,28 +124,23 @@ def _evaluated_snapshot(source, depsgraph, name):
     return obj
 
 
-def _clean_static_mesh(mesh) -> int:
-    """Triangulate STATIC and discard faces the native float solver rejects."""
-    bm = bmesh.new()
-    try:
-        bm.from_mesh(mesh)
-        bmesh.ops.triangulate(bm, faces=list(bm.faces))
-        rejected = []
-        for face in bm.faces:
-            if len(face.verts) != 3:
-                rejected.append(face)
-                continue
-            a, b, c = (vertex.co for vertex in face.verts)
-            twice_area = (b - a).cross(c - a).length
-            if not math.isfinite(twice_area) or twice_area <= _STATIC_TWICE_AREA_FILTER:
-                rejected.append(face)
-        if rejected:
-            bmesh.ops.delete(bm, geom=rejected, context="FACES")
-        bm.to_mesh(mesh)
-    finally:
-        bm.free()
-    mesh.update()
-    return len(rejected)
+def _animated_static_copy(source, name):
+    """Copy the object stack while sharing untouched source mesh data."""
+    obj = source.copy()
+    obj.name = name
+    obj.hide_viewport = False
+    obj.hide_render = True
+    obj.display_type = "WIRE"
+    obj.show_in_front = True
+    return obj
+
+
+def _is_prepared_object(obj) -> bool:
+    return bool(obj is not None and obj.get(_PREPARED_OBJECT_TAG, 0))
+
+
+def _is_prepared_collection(collection) -> bool:
+    return bool(collection is not None and collection.get(_PREPARED_COLLECTION_TAG, 0))
 
 
 def _validate_shell_mesh(mesh) -> None:
@@ -225,11 +265,11 @@ def _remove_prepared(settings, *, restore_visibility: bool) -> bool:
     collection = settings.prepared_collection
     objects = []
     for obj in (settings.prepared_shell_object, settings.prepared_static_object):
-        if obj is not None and obj.get(_PREPARED_OBJECT_TAG) == 1:
+        if _is_prepared_object(obj):
             objects.append(obj)
-    if collection is not None and collection.get(_PREPARED_COLLECTION_TAG) == 1:
+    if _is_prepared_collection(collection):
         for obj in collection.objects:
-            if obj.get(_PREPARED_OBJECT_TAG) == 1 and obj not in objects:
+            if _is_prepared_object(obj) and obj not in objects:
                 objects.append(obj)
 
     settings.prepared_shell_object = None
@@ -246,8 +286,7 @@ def _remove_prepared(settings, *, restore_visibility: bool) -> bool:
             bpy.data.meshes.remove(mesh)
 
     if (
-        collection is not None
-        and collection.get(_PREPARED_COLLECTION_TAG) == 1
+        _is_prepared_collection(collection)
         and not collection.objects
         and not collection.children
     ):
@@ -262,9 +301,9 @@ def _prepared_pair(settings):
     if shell is None or static is None:
         raise RuntimeError("Run Prepare Simulation Copies first")
     if (
-        shell.get(_PREPARED_OBJECT_TAG) != 1
+        shell.get(_PREPARED_OBJECT_TAG) != _PREPARED_VERSION
         or shell.get(_PREPARED_ROLE_TAG) != "SHELL"
-        or static.get(_PREPARED_OBJECT_TAG) != 1
+        or static.get(_PREPARED_OBJECT_TAG) != _PREPARED_VERSION
         or static.get(_PREPARED_ROLE_TAG) != "STATIC"
     ):
         raise RuntimeError("Prepared simulation objects are invalid; run Prepare again")
@@ -358,7 +397,7 @@ class OCS_Settings(PropertyGroup):
     )
     static_object: PointerProperty(
         name="Source STATIC",
-        description="Source collision body evaluated at the first bake frame",
+        description="Source collision body whose animation modifiers are copied and evaluated every frame",
         type=bpy.types.Object,
         poll=_mesh_object,
     )
@@ -470,7 +509,7 @@ class OCS_OT_set_active_shell(Operator):
 class OCS_OT_set_active_static(Operator):
     bl_idname = "ocs.set_active_static"
     bl_label = "Use Active as STATIC"
-    bl_description = "Assign the active mesh as the immutable STATIC collider"
+    bl_description = "Assign the active mesh as the animated STATIC collider"
 
     @classmethod
     def poll(cls, context):
@@ -485,7 +524,7 @@ class OCS_OT_prepare(Operator):
     bl_idname = "ocs.prepare"
     bl_label = "Prepare Simulation Copies"
     bl_description = (
-        "Evaluate source meshes into a separate collection and remove tiny STATIC faces"
+        "Create simulation copies and preserve the STATIC animation modifier stack"
     )
 
     def execute(self, context):
@@ -517,7 +556,7 @@ class OCS_OT_prepare(Operator):
             settings.last_seam_count = 0
 
             collection = bpy.data.collections.new(_PREPARED_COLLECTION_NAME)
-            collection[_PREPARED_COLLECTION_TAG] = 1
+            collection[_PREPARED_COLLECTION_TAG] = _PREPARED_VERSION
             context.scene.collection.children.link(collection)
             depsgraph = context.evaluated_depsgraph_get()
 
@@ -527,7 +566,7 @@ class OCS_OT_prepare(Operator):
                 f"{source_shell.name}_OMP_SHELL",
             )
             collection.objects.link(prepared_shell)
-            prepared_shell[_PREPARED_OBJECT_TAG] = 1
+            prepared_shell[_PREPARED_OBJECT_TAG] = _PREPARED_VERSION
             prepared_shell[_PREPARED_ROLE_TAG] = "SHELL"
             prepared_shell[_PREPARED_SOURCE_TAG] = source_shell.name
             _validate_shell_mesh(prepared_shell.data)
@@ -545,19 +584,19 @@ class OCS_OT_prepare(Operator):
             prepared_shell[_PREPARED_SEAM_DISTANCE_TAG] = settings.seam_search_distance
             prepared_shell[_PREPARED_SEAM_ENABLED_TAG] = settings.seam_enabled
 
-            prepared_static = _evaluated_snapshot(
-                source_static,
-                depsgraph,
-                f"{source_static.name}_OMP_STATIC",
+            prepared_static = _animated_static_copy(
+                source_static, f"{source_static.name}_OMP_STATIC"
             )
             collection.objects.link(prepared_static)
-            prepared_static[_PREPARED_OBJECT_TAG] = 1
+            prepared_static.hide_set(False)
+            prepared_static[_PREPARED_OBJECT_TAG] = _PREPARED_VERSION
             prepared_static[_PREPARED_ROLE_TAG] = "STATIC"
             prepared_static[_PREPARED_SOURCE_TAG] = source_static.name
-            skipped = _clean_static_mesh(prepared_static.data)
-            prepared_static.display_type = "WIRE"
-            prepared_static.hide_render = True
-            if not prepared_static.data.polygons:
+            context.view_layer.update()
+            depsgraph = context.evaluated_depsgraph_get()
+            (_static_vertices, static_triangles, skipped,
+             _static_topology) = _filtered_static_mesh(prepared_static, depsgraph)
+            if not static_triangles:
                 raise RuntimeError("Prepared STATIC has no usable triangles")
 
             settings.prepared_collection = collection
@@ -568,7 +607,8 @@ class OCS_OT_prepare(Operator):
             settings.last_prepare_skipped = skipped
             settings.last_seam_count = len(seam_pairs)
             settings.last_prepare_status = (
-                f"Prepared in {collection.name}; {len(seam_pairs)} seams; "
+                f"Prepared animated STATIC in {collection.name}; "
+                f"{len(seam_pairs)} seams; "
                 f"skipped {skipped} tiny STATIC triangles"
             )
             settings.last_status = "Ready to bake"
@@ -631,7 +671,7 @@ class OCS_OT_clear_bake(Operator):
 
     def execute(self, context):
         shell = context.scene.ocs_settings.prepared_shell_object
-        if shell is None or shell.get(_PREPARED_OBJECT_TAG) != 1:
+        if not _is_prepared_object(shell):
             self.report({"ERROR"}, "Run Prepare Simulation Copies first")
             return {"CANCELLED"}
         try:
@@ -688,7 +728,9 @@ class OCS_OT_bake(Operator):
                 _clear_owned_bake(shell)
 
             shell_vertices, shell_triangles = _shell_mesh(shell)
-            static_vertices, static_triangles = _shell_mesh(static)
+            depsgraph = context.evaluated_depsgraph_get()
+            (static_vertices, static_triangles, skipped_static,
+             static_topology) = _filtered_static_mesh(static, depsgraph)
             seam_pairs = (
                 _prepared_seam_pairs(shell) if settings.seam_enabled else []
             )
@@ -696,6 +738,7 @@ class OCS_OT_bake(Operator):
                 raise RuntimeError("SHELL has no triangles")
             if not static_triangles:
                 raise RuntimeError("STATIC has no triangles")
+            settings.last_prepare_skipped = skipped_static
 
             library = get_library()
             desc = library.default_desc()
@@ -736,6 +779,16 @@ class OCS_OT_bake(Operator):
 
                 final_stats = None
                 for frame in range(settings.frame_start + 1, settings.frame_end + 1):
+                    context.scene.frame_set(frame)
+                    depsgraph = context.evaluated_depsgraph_get()
+                    animated_static_vertices, topology = _evaluated_static_vertices(
+                        static, depsgraph
+                    )
+                    if topology != static_topology:
+                        raise RuntimeError(
+                            "Animated STATIC topology changed; use deformation-only modifiers"
+                        )
+                    solver.update_static_vertices(animated_static_vertices)
                     solver.step(frame_dt)
                     shape = shell.shape_key_add(name=f"OCS_{frame:06d}", from_mix=False)
                     shape.interpolation = "KEY_LINEAR"
@@ -752,7 +805,7 @@ class OCS_OT_bake(Operator):
             elapsed = time.perf_counter() - bake_started
             settings.last_status = (
                 f"Baked {settings.frame_end - settings.frame_start + 1} frames "
-                f"with {len(seam_pairs)} seams in {elapsed:.2f} s"
+                f"with {len(seam_pairs)} seams and animated STATIC in {elapsed:.2f} s"
             )
             if final_stats is not None:
                 settings.last_contacts = str(final_stats.contact_count)
@@ -821,6 +874,15 @@ class OCS_PT_solver(Panel):
         )
         prepared.label(text=f"SHELL: {shell_name}", icon="MESH_GRID")
         prepared.label(text=f"STATIC: {static_name}", icon="MOD_PHYSICS")
+        static_modifier_count = (
+            len(settings.prepared_static_object.modifiers)
+            if settings.prepared_static_object is not None
+            else 0
+        )
+        prepared.label(
+            text=f"Live STATIC modifiers: {static_modifier_count}",
+            icon="MODIFIER",
+        )
         prepared.label(text=settings.last_prepare_status, icon="INFO")
 
         timing = layout.box()

@@ -20,6 +20,15 @@ int main(void) {
         ocsDestroy(solver);
         return 1;
     }
+    {
+        const OcsVec3 vertex = {0.0f, 0.0f, 0.0f};
+        if (ocsUpdateStaticVertices(solver, &vertex, 1) !=
+            OCS_ERROR_INVALID_STATE) {
+            fputs("C ABI animated STATIC state check failed\n", stderr);
+            ocsDestroy(solver);
+            return 1;
+        }
+    }
     ocsDestroy(solver);
     puts("C ABI smoke test passed.");
     return 0;

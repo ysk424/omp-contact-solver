@@ -18,7 +18,7 @@
 extern "C" {
 #endif
 
-#define OCS_ABI_VERSION 2u
+#define OCS_ABI_VERSION 3u
 
 typedef struct OcsSolver OcsSolver;
 
@@ -94,12 +94,20 @@ OCS_API void ocsDefaultShellMaterial(OcsShellMaterial *material);
 OCS_API OcsSolver *ocsCreate(const OcsSolverDesc *desc);
 OCS_API void ocsDestroy(OcsSolver *solver);
 
-/* STATIC is immutable after ocsBuild(). Passing zero triangles clears it. */
+/* STATIC topology is frozen by ocsBuild(). Passing zero triangles clears it. */
 OCS_API OcsResult ocsSetStaticMesh(OcsSolver *solver,
                                    const OcsVec3 *vertices,
                                    uint32_t vertex_count,
                                    const OcsTriangle *triangles,
                                    uint32_t triangle_count);
+
+/* Queues deformed STATIC vertices for the next ocsStep(). The vertex count
+ * and triangle topology must match ocsSetStaticMesh(). During that step the
+ * STATIC surface is linearly interpolated over the configured substeps and
+ * its BVH is refitted. Call only after ocsBuild(). */
+OCS_API OcsResult ocsUpdateStaticVertices(OcsSolver *solver,
+                                          const OcsVec3 *vertices,
+                                          uint32_t vertex_count);
 
 /* Exactly one simulated SHELL mesh is supported. PIN constraints are absent. */
 OCS_API OcsResult ocsSetShellMesh(OcsSolver *solver,
@@ -115,7 +123,7 @@ OCS_API OcsResult ocsSetShellSeams(OcsSolver *solver,
                                    const OcsSeam *seams,
                                    uint32_t seam_count);
 
-/* Builds SHELL constraints and the immutable STATIC triangle BVH. */
+/* Builds SHELL constraints and the refittable STATIC triangle BVH. */
 OCS_API OcsResult ocsBuild(OcsSolver *solver);
 
 /* Advances by frame_dt seconds. The configured substeps are internal. */

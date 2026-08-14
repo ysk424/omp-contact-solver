@@ -1,9 +1,9 @@
 schema_version = "1.0.0"
 
 id = "omp_contact_solver"
-version = "0.3.1"
+version = "0.4.0"
 name = "OMP Contact Solver"
-tagline = "Bake CPU OpenMP cloth against static meshes"
+tagline = "Bake CPU OpenMP cloth against animated collision meshes"
 maintainer = "ysk424"
 type = "add-on"
 

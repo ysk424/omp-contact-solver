@@ -274,6 +274,62 @@ void test_swept_floor_contact() {
     ocsDestroy(solver);
 }
 
+void test_animated_static_refit() {
+    OcsSolverDesc desc;
+    ocsDefaultSolverDesc(&desc);
+    desc.gravity = {0.0f, 0.0f, 0.0f};
+    desc.substeps = 4;
+    desc.pd_iterations = 4;
+    OcsSolver *solver = ocsCreate(&desc);
+    require(solver != nullptr, "create animated-STATIC solver");
+
+    const OcsVec3 floor_start[] = {
+        {-2.0f, -0.02f, -2.0f}, {2.0f, -0.02f, -2.0f},
+        {2.0f, -0.02f, 2.0f}, {-2.0f, -0.02f, 2.0f}};
+    const OcsVec3 floor_end[] = {
+        {-2.0f, 0.0f, -2.0f}, {2.0f, 0.0f, -2.0f},
+        {2.0f, 0.0f, 2.0f}, {-2.0f, 0.0f, 2.0f}};
+    const OcsTriangle floor_triangles[] = {{0, 2, 1}, {0, 3, 2}};
+    require_ok(ocsSetStaticMesh(solver, floor_start, 4, floor_triangles, 2),
+               solver, "set animated STATIC start");
+
+    const OcsVec3 shell_vertices[] = {
+        {-0.2f, 0.0f, -0.2f}, {0.2f, 0.0f, -0.2f},
+        {0.0f, 0.0f, 0.2f}};
+    const OcsTriangle shell_triangle[] = {{0, 1, 2}};
+    OcsShellMaterial material;
+    ocsDefaultShellMaterial(&material);
+    material.thickness = 0.02f;
+    require_ok(ocsSetShellMesh(solver, shell_vertices, 3, shell_triangle, 1,
+                               &material),
+               solver, "set animated-STATIC SHELL");
+    require_ok(ocsBuild(solver), solver, "build animated-STATIC solver");
+    require_ok(ocsUpdateStaticVertices(solver, floor_end, 4), solver,
+               "queue animated STATIC vertices");
+    require_ok(ocsStep(solver, 1.0f / 24.0f), solver,
+               "step animated STATIC");
+
+    OcsVec3 result[3];
+    require_ok(ocsCopyShellPositions(solver, result, 3), solver,
+               "copy animated-STATIC positions");
+    for (OcsVec3 point : result) {
+        require(point.y >= material.thickness * 0.95f,
+                "rising STATIC must carry SHELL to its final surface");
+    }
+
+    OcsVec3 temporarily_degenerate[] = {
+        floor_end[0], floor_end[1], floor_end[0], floor_end[3]};
+    require_ok(ocsUpdateStaticVertices(solver, temporarily_degenerate, 4), solver,
+               "queue temporarily degenerate STATIC");
+    require_ok(ocsStep(solver, 1.0f / 24.0f), solver,
+               "ignore temporarily degenerate STATIC triangles");
+    require_ok(ocsUpdateStaticVertices(solver, floor_end, 4), solver,
+               "reactivate animated STATIC triangles");
+    require_ok(ocsStep(solver, 1.0f / 24.0f), solver,
+               "step reactivated STATIC triangles");
+    ocsDestroy(solver);
+}
+
 } // namespace
 
 int main() {
@@ -285,6 +341,7 @@ int main() {
     test_invalid_mesh();
     test_openmp_sized_mesh();
     test_swept_floor_contact();
+    test_animated_static_refit();
     std::puts("All omp-contact-solver tests passed.");
     return 0;
 }

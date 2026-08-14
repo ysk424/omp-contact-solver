@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Iterable, Sequence
 
 
-OCS_ABI_VERSION = 2
+OCS_ABI_VERSION = 3
 OCS_OK = 0
 
 
@@ -156,6 +156,12 @@ class SolverLibrary:
             ctypes.c_uint32,
         ]
         api.ocsSetStaticMesh.restype = ctypes.c_int32
+        api.ocsUpdateStaticVertices.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(Vec3),
+            ctypes.c_uint32,
+        ]
+        api.ocsUpdateStaticVertices.restype = ctypes.c_int32
         api.ocsSetShellMesh.argtypes = [
             ctypes.c_void_p,
             ctypes.POINTER(Vec3),
@@ -247,6 +253,15 @@ class Solver:
             len(triangle_array),
         )
         self._check(result, "Setting STATIC mesh")
+
+    def update_static_vertices(self, vertices) -> None:
+        vertex_array = _as_vec3_array(vertices)
+        result = self.library.api.ocsUpdateStaticVertices(
+            self.handle,
+            vertex_array if len(vertex_array) else None,
+            len(vertex_array),
+        )
+        self._check(result, "Updating animated STATIC vertices")
 
     def set_shell_mesh(self, vertices, triangles, material: ShellMaterial) -> None:
         vertex_array = _as_vec3_array(vertices)
