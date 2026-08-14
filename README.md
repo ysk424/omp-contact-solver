@@ -6,6 +6,10 @@ standalone solver and does not depend on CUDA or `ppf-contact-solver`.
 The library computes simulation vertex positions only. Rendering remains the
 responsibility of the caller.
 
+The completed design, Blender workflow, character measurements, recommended
+parameters, and known limitations are summarized in
+[`docs/completion_summary_ja.md`](docs/completion_summary_ja.md) (Japanese).
+
 ## Scope
 
 Supported:
@@ -110,7 +114,7 @@ cmake --build build --target blender-extension
 cmake --build build --target blender-extension-test
 ```
 
-Install `build/packages/omp_contact_solver-0.5.0-windows-x64.zip` from
+Install `build/packages/omp_contact_solver-0.5.1-windows-x64.zip` from
 **Edit > Preferences > Extensions > Install from Disk**. The controls are in
 **3D View > Sidebar > OMP Cloth**. Assign source meshes, then use **Prepare
 Simulation Copies**. The Extension evaluates the source `SHELL` at the first

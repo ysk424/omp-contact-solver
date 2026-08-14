@@ -96,6 +96,7 @@ def main():
             evaluated.to_mesh_clear()
 
         settings = bpy.context.scene.ocs_settings
+        assert settings.substeps == 10
         assert settings.seam_stiffness == 100000.0
         assert settings.strain_limit_enabled
         assert settings.strain_limit_percent == 5.0
@@ -161,7 +162,9 @@ def main():
             for a, b in seam_pairs
         ]
 
+        bpy.context.scene.frame_set(7)
         assert bpy.ops.ocs.bake() == {"FINISHED"}
+        assert bpy.context.scene.frame_current == 7
         keys = prepared_shell.data.shape_keys
         assert keys is not None
         assert keys.get("omp_contact_solver_bake_version") == 1
@@ -182,6 +185,7 @@ def main():
         )
         assert 0.219 <= final_height <= 0.35, final_height
         assert settings.last_status.startswith("Baked 24 frames")
+        assert settings.last_status.endswith("cursor restored to frame 7")
         bpy.context.scene.frame_set(24)
         animated_static_z = prepared_static.matrix_world.translation.z
         assert abs(animated_static_z - 0.2) < 1.0e-6, animated_static_z

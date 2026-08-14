@@ -65,7 +65,7 @@ def main():
     parser.add_argument("--crop-min", type=float, default=0.40)
     parser.add_argument("--crop-max", type=float, default=1.45)
     parser.add_argument("--thickness", type=float, default=0.01)
-    parser.add_argument("--substeps", type=int, default=4)
+    parser.add_argument("--substeps", type=int, default=10)
     parser.add_argument("--pd-iterations", type=int, default=8)
     parser.add_argument("--pcg-iterations", type=int, default=64)
     parser.add_argument("--collision-safety-passes", type=int, default=0)

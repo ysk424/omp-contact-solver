@@ -69,7 +69,7 @@ void ocsDefaultSolverDesc(OcsSolverDesc *desc) {
     std::memset(desc, 0, sizeof(*desc));
     desc->struct_size = sizeof(*desc);
     desc->gravity = {0.0f, -9.81f, 0.0f};
-    desc->substeps = 4;
+    desc->substeps = 10;
     desc->pd_iterations = 8;
     desc->pcg_iterations = 80;
     desc->pcg_relative_tolerance = 1.0e-5f;

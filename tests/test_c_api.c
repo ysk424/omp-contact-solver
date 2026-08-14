@@ -5,8 +5,8 @@
 int main(void) {
     OcsSolverDesc desc;
     ocsDefaultSolverDesc(&desc);
-    if (desc.struct_size != sizeof(desc) || ocsGetAbiVersion() != OCS_ABI_VERSION ||
-        !ocsIsOpenMpEnabled()) {
+    if (desc.struct_size != sizeof(desc) || desc.substeps != 10 ||
+        ocsGetAbiVersion() != OCS_ABI_VERSION || !ocsIsOpenMpEnabled()) {
         fputs("C ABI metadata check failed\n", stderr);
         return 1;
     }

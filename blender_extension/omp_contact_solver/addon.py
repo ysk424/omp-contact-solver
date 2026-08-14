@@ -1,7 +1,6 @@
 """Blender UI and bake pipeline for the OpenMP cloth DLL."""
 
 import math
-import time
 
 import bpy
 from bpy.props import (
@@ -514,7 +513,7 @@ class OCS_Settings(PropertyGroup):
         size=3,
         subtype="XYZ",
     )
-    substeps: IntProperty(name="Substeps", default=4, min=1, max=128)
+    substeps: IntProperty(name="Substeps", default=10, min=1, max=128)
     pd_iterations: IntProperty(name="PD Iterations", default=8, min=1, max=256)
     pcg_iterations: IntProperty(name="PCG Iterations", default=64, min=1, max=4096)
     pcg_tolerance: FloatProperty(
@@ -855,7 +854,6 @@ class OCS_OT_bake(Operator):
         progress = context.window_manager
         progress.progress_begin(settings.frame_start, settings.frame_end)
         _BAKE_RUNNING = True
-        bake_started = time.perf_counter()
         created_bake = False
         bake_succeeded = False
 
@@ -945,10 +943,11 @@ class OCS_OT_bake(Operator):
                     shell, settings.frame_start, settings.frame_end
                 )
 
-            elapsed = time.perf_counter() - bake_started
+            context.scene.frame_set(old_frame)
             settings.last_status = (
                 f"Baked {settings.frame_end - settings.frame_start + 1} frames "
-                f"with {len(seam_pairs)} seams and animated STATIC in {elapsed:.2f} s"
+                f"with {len(seam_pairs)} seams and animated STATIC; "
+                f"cursor restored to frame {context.scene.frame_current}"
             )
             if final_stats is not None:
                 settings.last_contacts = str(final_stats.contact_count)
@@ -957,7 +956,6 @@ class OCS_OT_bake(Operator):
                     f"{(final_stats.maximum_principal_stretch - 1.0) * 100.0:.2f}% "
                     f"({final_stats.strain_limit_projection_count} projections)"
                 )
-            context.scene.frame_set(settings.frame_start)
             bake_succeeded = True
             self.report({"INFO"}, settings.last_status)
             return {"FINISHED"}
